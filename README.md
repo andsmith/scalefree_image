@@ -37,9 +37,14 @@ Same as previous approximation, but higher resolution (`-x 5`)
 ![Input image](output/output_132_redrose_circles_00000005.jpeg?raw=true "input")
 
 
-Line approximation, zoomed out, high res (`-b 3 -x 2.5`).
+Line approximation, zoomed out, high res (`-b 3 -x 4`).
 
-![Input image](output/output_130_redrose_lines_00000005_scaled.jpeg?raw=true "input")
+![Input image](output/output_130_redrose_lines_00000006.jpeg?raw=true "input")
+
+
+Circle approximation, zoomed out, high res (`-b 3 -x 4`).
+
+![Input image](output/output_131_redrose_circles_00000003.jpeg?raw=true "input")
 
 
 #### Usage

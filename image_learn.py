@@ -115,20 +115,20 @@ class ScaleInvariantImage(object):
 
         # Learn using lines and or circles (functional api)
         input = Input((2,))
-
-        """
         # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
-        line_layer = LineLayer(1000, input_shape=(2,))(input)
+        line_layer = LineLayer(500, input_shape=(2,))(input)
         #circle_layer = CircleLayer(100,input_shape=(2,))(input)
-        middle = Dense(3000, activation = tf.nn.relu, use_bias=True,
+        middle = Dense(10, activation = tf.nn.relu, use_bias=True,
                        kernel_initializer='random_normal')(line_layer)
+        #middle2 = Dense(20, activation = tf.nn.relu, use_bias=True,
+        #               kernel_initializer='random_normal')(middle)
         """
         # Use both circles and lines in parallel
         circle_layer = CircleLayer(100,input_shape=(2,))(input)
         line_layer = LineLayer(100, input_shape=(2,))(input)
         middle = Dense(500, activation = tf.nn.relu, use_bias=True,
                       kernel_initializer='random_normal')(keras.layers.concatenate([circle_layer, line_layer]))
-
+        """
 
         output = Dense(3, use_bias=True)(middle)
         self._model = Model(inputs=input, outputs=output)

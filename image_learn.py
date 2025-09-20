@@ -33,7 +33,7 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1):
+    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1, use_false_gradient=False):
         if image is None and state is None:
             raise Exception("Need input image, or state to restore.")
         self.n_hidden = n_hidden
@@ -42,6 +42,7 @@ class ScaleInvariantImage(object):
         self.div_type = div_type
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.use_false_gradient = use_false_gradient
         self._image = image
 
         if int(image is None) + int(state is None) != 1:
@@ -115,7 +116,10 @@ class ScaleInvariantImage(object):
         # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
         if self.div_type in DIV_TYPES:
             layer_class = DIV_TYPES[self.div_type]
-            div_layer = layer_class(self.n_dividers, input_shape=(2,))(input)
+            if self.div_type == 'linear':
+                div_layer = layer_class(self.n_dividers, use_false_gradient=self.use_false_gradient, input_shape=(2,))(input)
+            else:
+                div_layer = layer_class(self.n_dividers, input_shape=(2,))(input)
         else:
             raise Exception("Unknown division type:  %s, must be one of:  %s." % (self.div_type,
                                                                                   ', '.join(DIV_TYPES.keys())))
@@ -170,19 +174,19 @@ class UIDisplay(object):
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
     def __init__(self, state_file=None, image_file=None, just_image=False, border=1.0, div_type='linear', 
-                 epochs_per_cycle=1, display_multiplier=1.0, downsample=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, **kwargs):
+                 epochs_per_cycle=1, display_multiplier=1.0, downsample=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, use_false_gradient=False, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_dividers =    n_dividers
         self.n_hidden = n_hidden
         self.div_type = div_type
-        self._paused = True
         self._shutdown = False
         self._epoch = 0
         self._annotate=False
         self._cycle = 0  # number of cycles
         self._learning_rate = learning_rate
+        self.use_false_gradient = use_false_gradient
 
         if int(image_file is None) + int(state_file is None) != 1:
             raise Exception("Need input image, or state to restore.")
@@ -203,7 +207,7 @@ class UIDisplay(object):
 
             print("KWARGS: ", kwargs)
             self._sim = ScaleInvariantImage(n_dividers=n_dividers, n_hidden=n_hidden, learning_rate=self._learning_rate,
-                                            image=self._image, div_type=self.div_type, state=None, **kwargs)
+                                            image=self._image, div_type=self.div_type, use_false_gradient=self.use_false_gradient, state=None, **kwargs)
             self._cycle = 0
 
         logging.info("Using output dir:  %s" % (self._out_dir,))
@@ -290,9 +294,6 @@ class UIDisplay(object):
             logging.info("Training batch_size: %i, cycle: %i" % (self._sim.batch_size, self._cycle))
             if self._shutdown:
                 break
-            elif self._paused:
-                while self._paused and not self._shutdown:
-                    time.sleep(.2)
 
             self._sim.train_more()
 
@@ -340,8 +341,6 @@ class UIDisplay(object):
                  'n_dividers:  %i' % (self.n_dividers,),
                  'n_hidden:  %i' % (self.n_hidden,),
                  'Cycle (of %i epochs):  %i' % (self._epochs_per_cycle, self._cycle,),]
-        if self._paused:
-            lines.append("PAUSED - press 'p' or SPACE to unpause")
         y = 20
         x = 10
         font_scale = 0.75
@@ -361,7 +360,6 @@ class UIDisplay(object):
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(win_name, 600, 600)
         # cv2.setMouseCallback(win_name, self._on_mouse)
-        self._paused = False
         self._start()
 
         while not self._shutdown:
@@ -371,10 +369,6 @@ class UIDisplay(object):
                 logging.info("Shutdown requested, waiting for worker to finish...")
                 self._shutdown = True
                 break
-            elif k == ord('p') or k == 32:  # 'p' or SPACE to pause/unpause
-                self._paused = not self._paused
-                logging.info("Paused set to: %s" % (self._paused,))
-                self._frame = self._make_frame()
             elif k == ord('a'):  # 'a' to toggle annotation
                 self._annotate = not self._annotate
                 logging.info("Annotation set to: %s" % (self._annotate,))
@@ -403,6 +397,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-s", "--downsample", help="Downsample image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
     parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
+    parser.add_argument("--use_false_gradient", help="Use false gradient (tanh(cos_theta)) for LineLayer instead of sharp gradient.", action='store_true', default=False)
     parsed = parser.parse_args()
 
     kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.mult,

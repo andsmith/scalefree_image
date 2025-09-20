@@ -33,7 +33,19 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1):
+    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1, sharpness=1000.0):
+        """
+        :param n_hidden: number of hidden units in the middle
+        :param n_dividers: number of input units
+        :param div_type: type of division layer, one of DIV_TYPES
+        :param image: if not None, a HxWx3 or HxW numpy array containing the target image
+        :param state: if not None, a dict containing a saved model state
+        :param batch_size: training batch size
+        :param learning_rate: learning rate for the optimizer
+        :param epochs_per_cycle: number of epochs to train per cycle
+        :param sharpness: sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear
+
+        """
         if image is None and state is None:
             raise Exception("Need input image, or state to restore.")
         self.n_hidden = n_hidden
@@ -43,9 +55,11 @@ class ScaleInvariantImage(object):
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self._image = image
+        self.sharpness = sharpness
 
         if int(image is None) + int(state is None) != 1:
             raise Exception("Need input image, or state to restore.")
+
         self._input, self._output = self._make_train()
 
         self._init_model(state)
@@ -84,11 +98,12 @@ class ScaleInvariantImage(object):
 
     def _make_train(self, shape=None):
         in_x, in_y = make_input_grid(self._image.shape)
+        grid_shape = in_x.shape
         input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
         r, g, b = cv2.split(self._image / 255.0)
         output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
-        logging.info("Made inputs [%i, %i] spanning [%.3f, %.3f] and [%.3f, %.3f]." %
-                     (input.shape[0], input.shape[1], input[:,0].min(), input[:,0].max(), input[:,1].min(), input[:,1].max()))  
+        logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f]. <------------" %
+                     (grid_shape, input[:,0].min(), input[:,0].max(), input[:,1].min(), input[:,1].max()))  
 
         return input, output
 
@@ -115,7 +130,7 @@ class ScaleInvariantImage(object):
         # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
         if self.div_type in DIV_TYPES:
             layer_class = DIV_TYPES[self.div_type]
-            div_layer = layer_class(self.n_dividers, input_shape=(2,))(input)
+            div_layer = layer_class(self.n_dividers, input_shape=(2,), sharpness=self.sharpness)(input) if self.div_type != 'relu' else layer_class(self.n_dividers, input_shape=(2,))(input)
         else:
             raise Exception("Unknown division type:  %s, must be one of:  %s." % (self.div_type,
                                                                                   ', '.join(DIV_TYPES.keys())))
@@ -195,15 +210,17 @@ class UIDisplay(object):
         else:
             if not os.path.exists(image_file):
                 raise Exception("Image file doesn't exist:  %s" % (image_file,))
+            
             self._image = self._downsample_image(cv2.imread(image_file)[:, :, ::-1], downsample)
-
+            logging.info("Loaded image %s with shape %s (downsample factor %.2f):  %i training samples" % (image_file, self._image.shape,downsample, self._image.shape[0]*self._image.shape[1]))
             # for the filename suffix, use the image bare name without extension
             self._suffix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
             self._out_dir = os.path.dirname(os.path.abspath(image_file))
 
             print("KWARGS: ", kwargs)
             self._sim = ScaleInvariantImage(n_dividers=n_dividers, n_hidden=n_hidden, learning_rate=self._learning_rate,
-                                            image=self._image, div_type=self.div_type, state=None, **kwargs)
+                                            image=self._image, div_type=self.div_type, state=None, epochs_per_cycle=self._epochs_per_cycle, 
+                                            **kwargs)
             self._cycle = 0
 
         logging.info("Using output dir:  %s" % (self._out_dir,))
@@ -282,9 +299,10 @@ class UIDisplay(object):
         logging.info("Starting training:")
         logging.info("\tBatch size: %i" % (self._sim.batch_size,))
         logging.info("\tDiv type:  %s" % (self.div_type,))
+        logging.info("\tDivider units:  %i" % (self.n_dividers,))
         logging.info("\tHidden units:  %i" % (self.n_hidden,))
         logging.info("\tTraining samples: %i" % (self._sim._input.shape[0],))
-        
+        logging.info("\tSharpness: %f" % (self._sim.sharpness,))
 
         while not self._shutdown:
             logging.info("Training batch_size: %i, cycle: %i" % (self._sim.batch_size, self._cycle))
@@ -400,13 +418,13 @@ if __name__ == "__main__":
     parser.add_argument("-j", "--just_image", help="Just do an image, no training.", action='store_true', default=False)
     parser.add_argument("-b", "--border", help="Extrapolate outward from the original shape by this factor.",
                         type=float, default=0.0)
-    parser.add_argument(
-        "-s", "--downsample", help="Downsample image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
+    parser.add_argument("-p", "--downsample", help="Downsample image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
     parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
+    parser.add_argument('-s', "--sharpness", help="Sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear.", type=float, default=1000.0)
     parsed = parser.parse_args()
 
     kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.mult,
-              'border': parsed.border, 
+              'border': parsed.border, 'sharpness': parsed.sharpness,
               'downsample': parsed.downsample, 'n_dividers': parsed.n_dividers,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden,
               'div_type': parsed.type, 'learning_rate': parsed.learning_rate}

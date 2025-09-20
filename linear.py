@@ -5,6 +5,7 @@ from tensorflow.keras import backend as K
 from tensorflow.keras.layers import Layer
 from tensorflow.keras.initializers import RandomUniform, Constant
 import numpy as np
+import logging
 
 
 class LineLayer (Layer):
@@ -25,6 +26,8 @@ class LineLayer (Layer):
         self.angles = None
         self.sharpness = None
         super(LineLayer, self).__init__(**kwargs)
+
+        logging.info(f"LineLayer initialized with use_false_gradient={self.use_false_gradient}, sharpness={self._sharpness}")
 
     def build(self, input_shape):
         self.centers = self.add_weight(name='centers',

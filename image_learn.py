@@ -33,7 +33,7 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1, sharpness=1000.0, use_false_gradient=False):
+    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1, sharpness=1000.0, false_gradient=False):
         """
         :param n_hidden: number of hidden units in the middle
         :param n_dividers: number of input units
@@ -54,7 +54,7 @@ class ScaleInvariantImage(object):
         self.div_type = div_type
         self.batch_size = batch_size
         self.learning_rate = learning_rate
-        self.use_false_gradient = use_false_gradient
+        self.use_false_gradient = false_gradient
         self._image = image
         self.sharpness = sharpness
 
@@ -131,10 +131,7 @@ class ScaleInvariantImage(object):
         # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
         if self.div_type in DIV_TYPES:
             layer_class = DIV_TYPES[self.div_type]
-            if self.div_type == 'linear':
-                div_layer = layer_class(self.n_dividers, use_false_gradient=self.use_false_gradient, input_shape=(2,))(input)
-            else:
-                div_layer = layer_class(self.n_dividers, input_shape=(2,), sharpness=self.sharpness)(input) if self.div_type != 'relu' else layer_class(self.n_dividers, input_shape=(2,))(input)
+            div_layer = layer_class(self.n_dividers, use_false_gradient=self.use_false_gradient, input_shape=(2,), sharpness=self.sharpness)(input) if self.div_type != 'relu' else layer_class(self.n_dividers, input_shape=(2,))(input)
         else:
             raise Exception("Unknown division type:  %s, must be one of:  %s." % (self.div_type,
                                                                                   ', '.join(DIV_TYPES.keys())))
@@ -189,7 +186,7 @@ class UIDisplay(object):
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
     def __init__(self, state_file=None, image_file=None, just_image=False, border=1.0, div_type='linear', 
-                 epochs_per_cycle=1, display_multiplier=1.0, downsample=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, use_false_gradient=False, **kwargs):
+                 epochs_per_cycle=1, display_multiplier=1.0, downsample=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
@@ -201,7 +198,6 @@ class UIDisplay(object):
         self._annotate=False
         self._cycle = 0  # number of cycles
         self._learning_rate = learning_rate
-        self.use_false_gradient = use_false_gradient
 
         if int(image_file is None) + int(state_file is None) != 1:
             raise Exception("Need input image, or state to restore.")
@@ -223,7 +219,7 @@ class UIDisplay(object):
 
             print("KWARGS: ", kwargs)
             self._sim = ScaleInvariantImage(n_dividers=n_dividers, n_hidden=n_hidden, learning_rate=self._learning_rate,
-                                            image=self._image, div_type=self.div_type, use_false_gradient=self.use_false_gradient, state=None, epochs_per_cycle=self._epochs_per_cycle, 
+                                            image=self._image, div_type=self.div_type, state=None, epochs_per_cycle=self._epochs_per_cycle, 
                                             **kwargs)
             self._cycle = 0
 
@@ -307,6 +303,7 @@ class UIDisplay(object):
         logging.info("\tHidden units:  %i" % (self.n_hidden,))
         logging.info("\tTraining samples: %i" % (self._sim._input.shape[0],))
         logging.info("\tSharpness: %f" % (self._sim.sharpness,))
+        logging.info("\tUse false gradient (tanh(cos_theta)) for LineLayer: %s" % (self._sim.use_false_gradient,))
 
         while not self._shutdown:
             logging.info("Training batch_size: %i, cycle: %i" % (self._sim.batch_size, self._cycle))
@@ -415,11 +412,11 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--downsample", help="Downsample image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
     parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
     parser.add_argument('-s', "--sharpness", help="Sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear.", type=float, default=1000.0)
-    parser.add_argument("--use_false_gradient", help="Use false gradient (tanh(cos_theta)) for LineLayer instead of sharp gradient.", action='store_true', default=False)
+    parser.add_argument("--use_false_gradient", help="Use false gradient (tanh(cos_theta)) for LineLayer instead of sharp gradient.", action='store_true', default=True)
     parsed = parser.parse_args()
 
     kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.mult,
-              'border': parsed.border, 'sharpness': parsed.sharpness,
+              'border': parsed.border, 'sharpness': parsed.sharpness,'false_gradient': parsed.use_false_gradient,
               'downsample': parsed.downsample, 'n_dividers': parsed.n_dividers,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden,
               'div_type': parsed.type, 'learning_rate': parsed.learning_rate}

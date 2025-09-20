@@ -1,7 +1,7 @@
 import tensorflow as tf
-from keras import backend as K
-from keras.engine.topology import Layer
-from keras.initializers import RandomUniform, Initializer, Constant
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Layer
+from tensorflow.keras.initializers import RandomUniform, Initializer, Constant
 import numpy as np
 
 
@@ -13,9 +13,10 @@ class InitRadiiRandom(Initializer):
         self._num = num
         pass
 
-    def __call__(self, dtype=None):
-        spread = [.05, 1.0]
-        sigmas = (np.random.rand(self._num) - spread[0]) * (spread[1] - spread[0])
+    def __call__(self, shape, dtype=None, **kwargs):
+        spread = [.01, 1.0]
+        sigmas = (np.random.rand(self._num) - spread[0]) * (spread[1] - spread[0])**5.0  # bias towards smaller radii
+        sigmas = np.clip(sigmas, 0.01, 1.0)
         return sigmas
 
 
@@ -29,7 +30,7 @@ class CircleLayer(Layer):
         self._sharpness = sharpness
 
         if not initializer:
-            self.initializer = RandomUniform(0.0, 1.0)
+            self.initializer = RandomUniform(-1.0, 1.0)
         else:
             self.initializer = initializer
         self.centers = None

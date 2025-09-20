@@ -1,9 +1,9 @@
 import random
 import tensorflow as tf
 
-from keras import backend as K
-from keras.engine.topology import Layer
-from keras.initializers import RandomUniform, Constant
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Layer
+from tensorflow.keras.initializers import RandomUniform, Constant
 import numpy as np
 
 
@@ -13,7 +13,7 @@ class LineLayer (Layer):
     Like tanh units, but compress horizontally to a constant width
     """
 
-    def __init__(self, output_dim, sharpness=1500, initializer=None, **kwargs):
+    def __init__(self, output_dim, sharpness=500.0, initializer=None, **kwargs):
         self.output_dim = output_dim
         self._sharpness = sharpness
         if not initializer:
@@ -48,8 +48,12 @@ class LineLayer (Layer):
                                       K.expand_dims(K.sin(self.angles))), 1)
         C = K.expand_dims(self.centers)
         vecs = K.transpose(C-K.transpose(x))
-        offset = tf.reduce_sum(tf.multiply(vecs, K.transpose(unit_vectors)), axis=1)
-        p = K.tanh(self.sharpness * offset) # -0.05 * K.exp(K.log(1.0 + dist**2.0))
+
+        # normalize to unit vectors
+        vecs = vecs / (K.sqrt(tf.reduce_sum(vecs**2, axis=1, keepdims=True)) + 1e-10)
+        # take the dot product of input vector with each unit vector
+        cos_theta = tf.reduce_sum(tf.multiply(vecs, K.transpose(unit_vectors)), axis=1)
+        p = K.tanh(self.sharpness * cos_theta) # -0.05 * K.exp(K.log(1.0 + dist**2.0))
         return p
 
     def compute_output_shape(self, input_shape):

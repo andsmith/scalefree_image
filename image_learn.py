@@ -1,25 +1,29 @@
+import time
 import tensorflow as tf
-import keras
 import tempfile
 import shutil
-import cPickle as cp
-from keras.layers.core import Dense
-from keras.layers import Input
-from keras.models import Model
-from keras import backend as K
+try:
+    import cPickle as cp
+except ImportError:
+    import pickle as cp
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Input
+from tensorflow.keras.models import Model
+from tensorflow.keras import backend as K
 import numpy as np
 import cv2
-import re
+import time
 import os
 import logging
+from util import make_input_grid
 import argparse
-import vispy.scene
-import vispy.scene
-import vispy.app
-from vispy.scene.visuals import Image
 from threading import Thread
 from circular import CircleLayer
 from linear import LineLayer
+from normal import NormalLayer
+from keras.optimizers.schedules import ExponentialDecay
+
+DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'relu': NormalLayer}
 
 
 class ScaleInvariantImage(object):
@@ -28,19 +32,44 @@ class ScaleInvariantImage(object):
     learn f(x, y) = (r,g,b) using every pixel as a training example
 
     """
-    def __init__(self, image=None, n_cores=0, state=None):
+
+    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1):
+        if image is None and state is None:
+            raise Exception("Need input image, or state to restore.")
+        self.n_hidden = n_hidden
+        self._epochs_per_cycle = epochs_per_cycle
+        self.n_dividers = n_dividers
+        self.div_type = div_type
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self._image = image
 
         if int(image is None) + int(state is None) != 1:
             raise Exception("Need input image, or state to restore.")
+        self._input, self._output = self._make_train()
 
-        self._image = image
-        self._init_model(n_cores, state)
-        self._make_train()
-        self._n_cores = n_cores  # override
+        self._init_model(state)
+        
+        # Save training data to numPy files for later analysis
+        np.savez('training_data.npz', input=self._input, output=self._output, img_shape=self._image.shape)
+        logging.info("Saved training data to training_data.npz")
+
+
+
+        logging.info("Training set samples: %i" % (self._input.shape[0],))
+        logging.info("Made input:  %s" % (self._input.shape,))
+        logging.info("Made output:  %s" % (self._output.shape,))
+        logging.info("Input spans:  [%f, %f]" % (np.min(self._input), np.max(self._input)))
+
+
+    def _calc_training_steps_per_cycle(self):
+        n_steps_per_epoch = int(np.ceil(float(self._input.shape[0]) / float(self.batch_size)))
+        logging.info("Training steps per epoch:  %i" % (n_steps_per_epoch,))
+        return n_steps_per_epoch * self._epochs_per_cycle
 
     def get_image(self):
         return self._image
-        
+
     def pixel_to_coord(self, x, y):
 
         # scale to fit in [-1, 1] x [-1, 1]
@@ -48,203 +77,173 @@ class ScaleInvariantImage(object):
         y = (y - self._image.shape[0]/2.0) * self._scale
 
         # add polar coords?
-        #r = np.sqrt(x*x + y*y)
-        #t = np.abs(np.arctan2(y, x))
+        # r = np.sqrt(x*x + y*y)
+        # t = np.abs(np.arctan2(y, x))
 
-        return x, y  # , r, t
+        return x, y  # , r, t 
 
-    def _make_input(self, shape):
-        x, y = np.meshgrid(np.arange(shape[1]),
-                           np.arange(shape[0]))
-        x = x * self._image.shape[1] / float(shape[1])
-        y = y * self._image.shape[0] / float(shape[0])
-        x, y = self.pixel_to_coord(x, y)
-        logging.info( "Made inputs [%i, %i] spanning [%.3f, %.3f] and [%.3f, %.3f]."  % (x.shape[0], x.shape[1], np.min(x), np.max(x), np.min(y), np.max(y)))
-        return np.hstack((x.reshape(-1,1), y.reshape(-1, 1)))#, r.reshape(-1,1)))
+    def _make_train(self, shape=None):
+        in_x, in_y = make_input_grid(self._image.shape)
+        input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
+        r, g, b = cv2.split(self._image / 255.0)
+        output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
+        logging.info("Made inputs [%i, %i] spanning [%.3f, %.3f] and [%.3f, %.3f]." %
+                     (input.shape[0], input.shape[1], input[:,0].min(), input[:,0].max(), input[:,1].min(), input[:,1].max()))  
 
-    def _calc_scale(self):
-        big_dim = np.max(self._image.shape)
-        self._scale = 2.0 / big_dim
-
-    def _make_train(self):
-        self._calc_scale()
-        r, g, b = cv2.split(self._image)
-        self._input = self._make_input(self._image.shape)
-        self._output = np.hstack((r.reshape(-1,1), g.reshape(-1,1), b.reshape(-1,1)))/255.0
-        logging.info( "Made input:  %s" % (self._input.shape,))
-        logging.info( "Made output:  %s" % (self._output.shape,))
-        logging.info( "Input spans:  [%f, %f]" % (np.min(self._input), np.max(self._input)))
-
-    def get_session_and_graph(self):
-        return self._tf_session, self._tf_graph
+        return input, output
 
     def get_model(self):
         return self._model
 
-    def _init_model(self, n_cores, state):
-        if n_cores > 0:
-            K.set_session(K.tf.Session(config=K.tf.ConfigProto(intra_op_parallelism_threads=n_cores,
-                                                               inter_op_parallelism_threads=1)))
+    def _init_model(self, state):
+        """
+        Initialize the TF model, either from scratch or from a saved state
+        :param state: if not None, a dict containing a saved model state
+        :param n_hidden: number of hidden units in the middle
+        :param n_dividers: number of input units
+        """
 
-        self._tf_session = K.get_session()  # this creates a new session since one doesn't exist already.
-        self._tf_graph = tf.get_default_graph()
         if state is not None:
             self._model = state['model']
             self._image = state['image']
-            logging.info( "Model state restored")
+            logging.info("Model state restored")
             return
 
-        """
-        # Learn using ReLu inputs ...
-        self._model = tf.keras.models.Sequential([
-            tf.keras.layers.Dense(self._n_hidden, activation=tf.nn.relu, use_bias=True,
-                                  kernel_initializer='random_normal'),
-            tf.keras.layers.Dense(3, activation=keras.layers.LeakyReLU(alpha=0.1), use_bias=True)])
-
-        # ... or, learn using 2 layers of ReLu inputs
-        self._model = tf.keras.models.Sequential([
-            tf.keras.layers.Dense(2000, activation=tf.nn.relu, use_bias=True, kernel_initializer='random_normal'),
-            tf.keras.layers.Dense(2000, activation=tf.nn.relu, use_bias=True, kernel_initializer='random_normal'),
-            tf.keras.layers.Dense(3, use_bias=True)])
-
-
-        self._model.compile(optimizer='adadelta',
-                            loss='mean_squared_error',
-                            metrics=['accuracy'])
-        """
-
-        # Learn using lines and or circles (functional api)
+        # Input is just the (x,y) pixel coordinates (scaled)
         input = Input((2,))
-        # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
-        line_layer = LineLayer(500, input_shape=(2,))(input)
-        #circle_layer = CircleLayer(100,input_shape=(2,))(input)
-        middle = Dense(10, activation = tf.nn.relu, use_bias=True,
-                       kernel_initializer='random_normal')(line_layer)
-        #middle2 = Dense(20, activation = tf.nn.relu, use_bias=True,
-        #               kernel_initializer='random_normal')(middle)
-        """
-        # Use both circles and lines in parallel
-        circle_layer = CircleLayer(100,input_shape=(2,))(input)
-        line_layer = LineLayer(100, input_shape=(2,))(input)
-        middle = Dense(500, activation = tf.nn.relu, use_bias=True,
-                      kernel_initializer='random_normal')(keras.layers.concatenate([circle_layer, line_layer]))
-        """
 
-        output = Dense(3, use_bias=True)(middle)
+        # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
+        if self.div_type in DIV_TYPES:
+            layer_class = DIV_TYPES[self.div_type]
+            div_layer = layer_class(self.n_dividers, input_shape=(2,))(input)
+        else:
+            raise Exception("Unknown division type:  %s, must be one of:  %s." % (self.div_type,
+                                                                                  ', '.join(DIV_TYPES.keys())))
+
+        middle = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
+                       kernel_initializer='random_normal')(div_layer)
+        output = Dense(3, use_bias=True, activation=tf.nn.sigmoid)(middle)
         self._model = Model(inputs=input, outputs=output)
 
         self._model.compile(loss='mean_squared_error',
-                            optimizer='adadelta')
+                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self.learning_rate))
 
-        logging.info( "INIT DONE")
+        logging.info("INIT DONE")
 
-    def train_epochs(self, n=1):
-        self._model.fit(self._input, self._output, epochs=n, shuffle=True)
+    def train_more(self):
+        rand = np.random.permutation(self._input.shape[0])
+        self._input = self._input[rand]
+        self._output = self._output[rand]
 
-    def get_display_image(self, shape, margin=1.0):
-        inputs = self._make_input(shape)  * margin
-        logging.info( "Rescaled inputs to span [%.3f, %.3f] and [%.3f, %.3f]."  % (np.min(inputs[:,0]),
-                                                                                     np.max(inputs[:,0]),
-                                                                                     np.min(inputs[:,1]),
-                                                                                     np.max(inputs[:,1])))
+        self._model.fit(self._input, self._output, epochs=self._epochs_per_cycle, batch_size=self.batch_size, verbose=True)
+
+    def get_display_image(self, resolution=1.0, margin=1.0):
+        x,y = make_input_grid(self._image.shape, resolution, margin)
+        shape = x.shape
+        logging.info("Making display image with shape:  %s" % (shape,))
+        inputs = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
+        logging.info("Rescaled inputs to span [%.3f, %.3f] and [%.3f, %.3f]." % (np.min(inputs[:, 0]),
+                                                                                 np.max(inputs[:, 0]),
+                                                                                 np.min(inputs[:, 1]),
+                                                                                 np.max(inputs[:, 1])))
         rgb = self._model.predict(inputs)
-        logging.info( "Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
-        img = cv2.merge((rgb[:,0].reshape(shape[:2]), rgb[:,1].reshape(shape[:2]), rgb[:,2].reshape(shape[:2])))
-        n_clipped = np.sum(img<0) + np.sum(img>1)
-        logging.info( "Display clipping:  %i (%.3f %%)" % (n_clipped,float(n_clipped)/img.size * 100.0))
-        img[img<0.] = 0.
-        img[img>1.] = 1.
+        logging.info("Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
+        img = cv2.merge((rgb[:, 0].reshape(shape[:2]), rgb[:, 1].reshape(shape[:2]), rgb[:, 2].reshape(shape[:2])))
+        n_clipped = np.sum(img < 0) + np.sum(img > 1)
+        logging.info("Display clipping:  %i (%.3f %%)" % (n_clipped, float(n_clipped)/img.size * 100.0))
+        img[img < 0.] = 0.
+        img[img > 1.] = 1.
         return img
 
 
-def flip(img):
-    return img[::-1,:,:]
+class UIDisplay(object):
+
+    """
+    Show image evolving as the model trains.
+    After epochs_per_cycle epochs, save the model and write an output image, update display.
+
+    If resuming from a saved state, continue the run number from the saved state.
 
 
-def privatize(arg):
-    return "_%s" % (arg, )
-
-
-class VispyUI(object):
-    _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer}
-
+    """
+    _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
-    _DEFAULTS = {'n_cores': 0,
-                 'epochs_per_cycle': 10,
-                 'display_multiplier': 3,
-                 'border': 1.0}
 
-    def __init__(self, state_file=None, image=None, suffix=None, out_dir="output", **kwargs):
-        # epochs_per_cycle=None, n_cores=None, display_multiplier=None, border=None):
+    def __init__(self, state_file=None, image_file=None, just_image=False, border=1.0, div_type='linear', 
+                 epochs_per_cycle=1, display_multiplier=1.0, downsample=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, **kwargs):
+        self._border = border
+        self._epochs_per_cycle = epochs_per_cycle
+        self._display_multiplier = display_multiplier
+        self.n_dividers =    n_dividers
+        self.n_hidden = n_hidden
+        self.div_type = div_type
+        self._paused = True
+        self._shutdown = False
+        self._epoch = 0
+        self._annotate=False
+        self._cycle = 0  # number of cycles
+        self._learning_rate = learning_rate
 
-        if int(image is None) + int(state_file is None) != 1:
+        if int(image_file is None) + int(state_file is None) != 1:
             raise Exception("Need input image, or state to restore.")
         # state
         self._tempdir = tempfile.mkdtemp(prefix="imageStretch_")
 
         if state_file is not None:
+            self._out_dir = os.path.dirname(os.path.abspath(state_file))
             self._load_state(state_file)
         else:
-            self._suffix = "" if suffix is None else "_%s" % (suffix,)
-            self._out_dir = out_dir
-            self._image = image
-            n_cores = kwargs['n_cores'] if 'n_cores' in kwargs else self._DEFAULTS['n_cores']
-            self._sim = ScaleInvariantImage(image, n_cores=n_cores, state=None)
-            self._index = 0
-            self._increment_run_number()
+            if not os.path.exists(image_file):
+                raise Exception("Image file doesn't exist:  %s" % (image_file,))
+            self._image = self._downsample_image(cv2.imread(image_file)[:, :, ::-1], downsample)
 
-        # let these be overridden by command line if they're still none
-        for arg in self._DEFAULTS:
-            if arg in kwargs and kwargs[arg] is not None:
-                setattr(self, privatize(arg), kwargs[arg])
-            elif not hasattr(self, privatize(arg)):
-                setattr(self, privatize(arg), self._DEFAULTS[arg])
+            # for the filename suffix, use the image bare name without extension
+            self._suffix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
+            self._out_dir = os.path.dirname(os.path.abspath(image_file))
 
-        logging.info("Using args:")
-        for arg in self._DEFAULTS:
-            logging.info("\t%s: %s" % (arg, getattr(self, privatize(arg))))
+            print("KWARGS: ", kwargs)
+            self._sim = ScaleInvariantImage(n_dividers=n_dividers, n_hidden=n_hidden, learning_rate=self._learning_rate,
+                                            image=self._image, div_type=self.div_type, state=None, **kwargs)
+            self._cycle = 0
 
-        self._interactive = not kwargs['just_image']
-        if kwargs['just_image']:
+        logging.info("Using output dir:  %s" % (self._out_dir,))
+        logging.info("Using output suffix:  %s" % (self._suffix,))
+
+        self._out_shape = (np.array(self._image.shape[:2]) * self._display_multiplier).astype(int)
+        self._frame = None
+
+        self._interactive = not just_image
+        if just_image:
             self._write_image()
+            self._shutdown = True
             return
 
-        # set up VISPY display
-        self._canvas = vispy.scene.SceneCanvas(keys='interactive', show=True, title="Route editor -- H for help")
-        self._viewbox = self._canvas.central_widget.add_view()
-        self._viewbox.camera = vispy.scene.cameras.PanZoomCamera(parent=self._viewbox.scene, aspect=1)
-        self._add_graphics_elements()
-        self.set_text_box_state(False)
-        self._canvas.events.key_press.connect(self._on_key_press)
-        self._canvas.events.close.connect(self._on_close)
-        self._closing = False
-        self._set_image(self._image / 255.0)
-        self._worker = Thread(target=self._train_thread)
+        self._frame = self._make_frame()
 
-        self._worker.start()
-        logging.info( "Started worker thread.")
+    def _downsample_image(self, image, factor):
+        if factor == 1.0:
+            return image
+        new_shape = (int(image.shape[1] / factor), int(image.shape[0] / factor))
+        logging.info("Downsampling image from %s to %s" % (image.shape, new_shape))
+        return cv2.resize(image, new_shape, interpolation=cv2.INTER_AREA)
 
-    def is_interactive(self):
-        return self._interactive
-
-    def _on_close(self, event):
-        self._closing = True
-        logging.info ("Shutting down...")
-
-    def _increment_run_number(self):
-        if not os.path.exists(self._out_dir):
-            os.mkdir(self._out_dir)
-        files = [f for f in os.listdir(self._out_dir) if f.startswith('output') and f.endswith('.png')]
-        numbers = [int(re.search('^output_([0-9]+)_.+.png', f).groups()[0]) for f in files]
-        self._run = np.max(numbers) + 1 if len(numbers) > 0 else 0
+    def get_filename(self, which='model'):
+        if which == 'model':
+            return "%s_model_%s_%id_%ih_cycle-%.8i.keras" % (self._suffix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden, self._cycle)
+        elif which == 'image':
+            return "%s_output_%s_%id_%ih_cycle-%.8i.png" % (self._suffix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden, self._cycle)
+        else:
+            raise Exception("Unknown filename type:  %s" % (which,))
 
     def _save_state(self):
         logging.info("Saving state...")
-        model_filename = "model_%i%s.tf" % (self._run, self._suffix)
+        model_filename = self.get_filename('model')
         model_filepath = os.path.join(self._out_dir, model_filename)
         temp_filepath = os.path.join(self._tempdir, model_filename)
+        if os.path.exists(model_filepath):
+            logging.warning("Model file %s already exists, overwriting!!!!" % (model_filepath,))
         self._sim.get_model().save(temp_filepath)
-        with open(temp_filepath, 'r') as infile:
+        with open(temp_filepath, 'rb') as infile:
             model_bin = infile.read()
         model = {'model_bin': model_bin,
                  'epc': self._epochs_per_cycle,
@@ -253,136 +252,135 @@ class VispyUI(object):
                  'out_dir': self._out_dir,
                  'image': self._image,
                  'border': self._border,
-                 'index': self._index,
-                 'run': self._run}
+                 'cycle': self._cycle}
 
-        with open(model_filepath, 'w') as outfile:
+        with open(model_filepath, 'wb') as outfile:
             cp.dump(model, outfile)
-        logging.info ("Wrote:  %s" % (model_filepath,))
+        logging.info("Wrote:  %s" % (model_filepath,))
 
     def _load_state(self, model_filepath):
         logging.info("loading state...")
-        with open(model_filepath, 'r') as infile:
+        with open(model_filepath, 'rb') as infile:
             state = cp.load(infile)
         self._epochs_per_cycle = state['epc']
         self._display_multiplier = state['dm']
         self._suffix = state['suffix']
         self._out_dir = state['out_dir']
         self._image = state['image']
-        self._index = state['index'] + 1
-        self._run = state['run']
+        self._cycle = state['cycle']
         self._border = state['border']
-        model_filename = "model_%i%s.tf" % (self._run, self._suffix)
+        model_filename = "model_%i%s.tf" % (self._cycle, self._suffix)
         model_filepath = os.path.join(self._tempdir, model_filename)
-        with open(model_filepath, 'w') as outfile:
+        with open(model_filepath, 'wb') as outfile:
             outfile.write(state['model_bin'])
-        state['model'] = keras.models.load_model(model_filepath, custom_objects=self._CUSTOM_LAYERS)
+        state['model'] = tf.keras.models.load_model(model_filepath, custom_objects=self._CUSTOM_LAYERS)
         self._sim = ScaleInvariantImage(state=state)
 
     def _train_thread(self):
-        tf_session, tf_graph = self._sim.get_session_and_graph()
-        with tf_session.as_default():
-            with tf_graph.as_default():
+        # TF 2.x doesn't use sessions or graphs in eager execution
+        self._epoch = 0
+        logging.info("Starting training:")
+        logging.info("\tBatch size: %i" % (self._sim.batch_size,))
+        logging.info("\tDiv type:  %s" % (self.div_type,))
+        logging.info("\tHidden units:  %i" % (self.n_hidden,))
+        logging.info("\tTraining samples: %i" % (self._sim._input.shape[0],))
+        
 
-                while not self._closing:
-                    for ep in range(self._epochs_per_cycle):
-                        if self._closing:
-                            break
-                        self._sim.train_epochs(1)
-                    self._save_state()
-                    if self._closing:
-                        break
-                    img = self._write_image()
-                    self._set_image(img)
-                    self._index += 1
-                    if self._closing:
-                        break
+        while not self._shutdown:
+            logging.info("Training batch_size: %i, cycle: %i" % (self._sim.batch_size, self._cycle))
+            if self._shutdown:
+                break
+            elif self._paused:
+                while self._paused and not self._shutdown:
+                    time.sleep(.2)
+
+            self._sim.train_more()
+
+            #self._save_state()
+            if self._shutdown:
+                break
+            img = self._write_image()
+            self._update_image(img)
+            self._cycle += 1
+            
         self._save_state()
-        logging.info ("Close detected, shutting down worker thread.")
-        logging.info ("Deleting work dir:  %s" % (self._tempdir,))
+        logging.info("Close detected, shutting down worker thread.")
+        logging.info("Deleting work dir:  %s" % (self._tempdir,))
         shutil.rmtree(self._tempdir)
+
+        # print FFMPEG command to make a movie from the images
+        logging.info("To make a movie from the images, try:")
+        logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_%id_%ih_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
+                     (self._suffix, self.div_type, self.n_dividers, self.n_hidden))
 
     def _write_image(self):
 
-        img = self._sim.get_display_image(np.array(self._sim.get_image().shape) * self._display_multiplier,
-                                          margin=self._border)
+        img = self._sim.get_display_image( margin=self._border, resolution=self._display_multiplier)
 
-        out_filename = "output_%i%s_%.8i.png" % (self._run, self._suffix, self._index)
+        out_filename = self.get_filename('image')
         out_path = os.path.join(self._out_dir, out_filename)
-        while os.path.exists(out_path):
-            self._index += 1
-            out_filename = "output_%i%s_%.8i.png" % (self._run, self._suffix, self._index)
-            out_path = os.path.join(self._out_dir, out_filename)
+        if os.path.exists(out_path):
+            logging.warning("Output image %s already exists, overwriting!!!!" % (out_path,))
+        out_path = os.path.join(self._out_dir, out_path)
 
         cv2.imwrite(out_path, np.uint8(255 * img[:, :, ::-1]))
-        logging.info ("Wrote:  %s" % (out_path,))
+        logging.info("Wrote:  %s" % (out_path,))
         return img
 
-    def _add_graphics_elements(self):
-        """
-        Create the VISPY graphics objects
-        """
+    def _update_image(self, image):
+        self._image = image
+        self._frame = self._make_frame()
+        logging.info("Setting %i x %i image" % (image.shape[1], image.shape[0]))
 
-        # Image
-        self._image_object = Image(self._image, parent=self._viewbox.scene)
-        self._image_object.set_gl_state('translucent', depth_test=False)
-        self._image_object.order = 1
-        self._image_object.visible = True
+    def _make_frame(self):
+        image = cv2.resize(self._image, (self._out_shape[1], self._out_shape[0]), interpolation=cv2.INTER_NEAREST)
+        if not self._annotate:
+            return image
+        lines = ['Architecture:  divider_type:  %s' % (self.div_type,),
+                 'n_dividers:  %i' % (self.n_dividers,),
+                 'n_hidden:  %i' % (self.n_hidden,),
+                 'Cycle (of %i epochs):  %i' % (self._epochs_per_cycle, self._cycle,),]
+        if self._paused:
+            lines.append("PAUSED - press 'p' or SPACE to unpause")
+        y = 20
+        x = 10
+        font_scale = 0.75
+        for line in lines:
+            cv2.putText(image, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 1, cv2.LINE_AA)
+            y += int(30 * font_scale)
 
-        self._text_box_width = 150
-        self._text_box_height = 40
-        self._text_box_offset = 10
-        # Text background box in upper-left corner
-        self._text_bkg_rect = vispy.scene.visuals.Rectangle([self._text_box_width / 2 + self._text_box_offset,
-                                                             self._text_box_height / 2 + self._text_box_offset],
-                                                            color=[0.1, 0.0, 0.0, .8],
-                                                            border_color=[0.1, 0.0, 0.0],
-                                                            border_width=2,
-                                                            height=self._text_box_height,
-                                                            width=self._text_box_width,
-                                                            radius=10.0,
-                                                            parent=self._canvas.scene)
-        self._text_bkg_rect.set_gl_state('translucent', depth_test=False)
-        self._text_bkg_rect.visible = True
-        self._text_bkg_rect.order = 2
+        return image
 
-        # Text
-        self._text = "?"
-        self._text_pos = [self._text_box_offset + 10, self._text_box_offset + 10]
-        self._text_obj = vispy.scene.visuals.Text(self._text,
-                                                  parent=self._canvas.scene,
-                                                  color=[0.9, 0.8, 0.8],
-                                                  anchor_x='left',
-                                                  anchor_y='top')
-        self._text_obj.pos = self._text_pos
-        self._text_obj.font_size = 18
-        self._text_obj.visible = True
-        self._text_obj.order = 3
+    def _start(self):
+        self._worker = Thread(target=self._train_thread)
+        self._worker.start()
+        logging.info("Started worker thread.")
 
-    def set_text_box_state(self, state):
-        self._text_bkg_rect.visible = state
-        self._text_obj.visible = state
+    def run(self):
+        win_name = "Scale-free image learning"
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(win_name, 600, 600)
+        # cv2.setMouseCallback(win_name, self._on_mouse)
+        self._paused = False
+        self._start()
 
-    def _change_text(self, new_text):
-        if new_text is not None:
-            self._text = new_text
-        else:
-            self._text = ""
-        self._text_obj.text = self._text
-
-    def _set_image(self, image=None):
-        xmin, ymin = 0, 0
-        xmax, ymax = image.shape[1], image.shape[0]
-        self._viewbox.camera.set_range(x=(xmin, xmax), y=(ymin, ymax), z=None)
-        self._image_object.set_data(flip(image))
-        self._image_object.visible = True
-
-    def _on_key_press(self, ev):
-        if ev.key.name == 'Escape':
-            self._canvas.close()
-        else:
-            self._change_text(ev.key.name)
-            logging.info("Unknown keypress:  %s" % (ev.key.name,))
+        while not self._shutdown:
+            cv2.imshow(win_name, self._frame[:, :, ::-1])
+            k = cv2.waitKey(100) & 0xFF
+            if k == 27 or k == ord('q'):  # ESC or 'q' to quit
+                logging.info("Shutdown requested, waiting for worker to finish...")
+                self._shutdown = True
+                break
+            elif k == ord('p') or k == 32:  # 'p' or SPACE to pause/unpause
+                self._paused = not self._paused
+                logging.info("Paused set to: %s" % (self._paused,))
+                self._frame = self._make_frame()
+            elif k == ord('a'):  # 'a' to toggle annotation
+                self._annotate = not self._annotate
+                logging.info("Annotation set to: %s" % (self._annotate,))
+                self._frame = self._make_frame()
+            elif k != 255:
+                logging.info("Unassigned key: %s" % (chr(k) if 32 <= k < 127 else k,))
 
 
 if __name__ == "__main__":
@@ -390,28 +388,34 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Learn an image.",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("-d", "--n_dividers",
+                        help="Number of divisions (linear or circular) to use.", type=int, default=1)
+    parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
+    parser.add_argument("-t", "--type", help="Type of division unit ('circular' or 'linear' or 'relu').",
+                        type=str, default='linear')
     parser.add_argument("-i", "--input_image", help="image to transform", type=str, default=None)
-    parser.add_argument("-o", "--output_dir", help="Output frames to this folder.", type=str, default='output')
-    parser.add_argument("-s", "--suffix", help="Suffix to put in filename.", type=str, default=None)
-    parser.add_argument("-e", "--epochs", help="Number of epochs between frames.", type=int, default=None)
-    parser.add_argument("-x", "--mult", help="Output image dimension multiplier.", type=int, default=None)
-    parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default='output')
-    parser.add_argument("-c", "--cores", help="Use this many cores.", type=int, default=None)
+    parser.add_argument("-e", "--epochs", help="Number of epochs between frames.", type=int, default=1)
+    parser.add_argument("-x", "--mult", help="Output image dimension multiplier.", type=float, default=1.0)
+    parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
     parser.add_argument("-j", "--just_image", help="Just do an image, no training.", action='store_true', default=False)
     parser.add_argument("-b", "--border", help="Extrapolate outward from the original shape by this factor.",
-                        type=float, default=None)
+                        type=float, default=0.0)
+    parser.add_argument(
+        "-s", "--downsample", help="Downsample image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
+    parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
     parsed = parser.parse_args()
 
-    kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.mult, 'suffix': parsed.suffix,
-              'out_dir': parsed.output_dir, 'n_cores': parsed.cores, 'border': parsed.border,
-              'just_image': parsed.just_image}
+    kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.mult,
+              'border': parsed.border, 
+              'downsample': parsed.downsample, 'n_dividers': parsed.n_dividers,
+              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden,
+              'div_type': parsed.type, 'learning_rate': parsed.learning_rate}
 
     if parsed.input_image is not None:
-        img = cv2.imread(parsed.input_image)[:, :, ::-1]
-        s = VispyUI(image=img, **kwargs)
+        s = UIDisplay(image_file=parsed.input_image, **kwargs)
     else:
         if parsed.model_file is None:
             raise Exception("Need input image (-i) or model file (-m).")
-        s = VispyUI(state_file=parsed.model_file, **kwargs)
-    if s.is_interactive():
-        vispy.app.run()
+        s = UIDisplay(state_file=parsed.model_file, **kwargs)
+
+    s.run()

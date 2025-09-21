@@ -19,14 +19,14 @@ Training on the famous portrait of George Washington by Gilbert Stuart, with N=1
 
 ### Overview - line units
 
+Lines are parameterized by center point $(C_x, C_y)$ and angle $\theta$.  The error  derivative is computed with respect to these parameters, in that form.
 
+The Excitation of line unit $j$ with centers $C_j$ and angles $\theta_j$ given input $X_i = (x_i,y_i)$ is defined 
 
- Lines are parameterized by center point $(C_x, C_y)$ and angle $\theta$.  The error  derivative is computed with respect to these parameters, in that form.
+$$
+E_j(X_i)\frac{(X_i - C_j) \cdot \begin{pmatrix} \cos(\theta_j) \\ \sin(\theta_j) \end{pmatrix}}{||X_i - C_j||}
+$$
 
-  The Excitation of line unit $j$ with centers $C_j$ and angles $\theta_j$ given input $X_i = (x_i,y_i)$ is defined 
-  $$
-  E_j(X_i)\frac{(X_i - C_j) \cdot \begin{pmatrix} \cos(\theta_j) \\ \sin(\theta_j) \end{pmatrix}}{||X_i - C_j||}
-  $$
 I.e., cosine for the angle between the vector from center to input and the line.
 
 The Activation of unit $j$ is:

@@ -121,6 +121,12 @@ class ScaleFreeImage(object):
     def _refresh(self):
         output_pred = self._model.predict(self._display_input)
         self._frame = self._output_vec_to_image(output_pred, self._display_shape)
+        
+        if self._frame.shape[:2] != self._out_shape:
+            # resize window to match image:
+            cv2.resizeWindow(self._win_name, self._frame.shape[1], self._frame.shape[0])
+            self._out_shape = self._frame.shape[:2]
+
 
         cv2.imshow(self._win_name, self._frame)
         k = cv2.waitKey(1) & 0xFF

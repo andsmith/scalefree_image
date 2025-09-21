@@ -88,12 +88,13 @@ class ScaleInvariantImage(object):
 
         logging.info("Model compiled with learning_rate:  %f" % (self.learning_rate,))
 
-    def _make_train(self, downscale):
+    def _make_train(self, downscale, keep_aspect=True):
         
         self._downscale_level = downscale
         self.image_train = downscale_image(self.image_raw, self._downscale_level)
 
-        in_x, in_y = make_input_grid(self.image_train.shape)
+        in_x, in_y = make_input_grid(self.image_train.shape, keep_aspect=keep_aspect)
+            
         grid_shape = in_x.shape
         input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
         r, g, b = cv2.split(self.image_train / 255.0)
@@ -147,9 +148,9 @@ class ScaleInvariantImage(object):
         self.cycle += 1
         return batch_history
 
-    def gen_image(self, output_shape, border=0.0):
+    def gen_image(self, output_shape, border=0.0, keep_aspect=True):
 
-        x, y = make_input_grid(output_shape, resolution=1.0, border=border)
+        x, y = make_input_grid(output_shape, resolution=1.0, border=border, keep_aspect=keep_aspect)
         shape = x.shape
         logging.info("Making display image with shape:  %s" % (shape,))
         inputs = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
@@ -228,13 +229,14 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, div_type='linear', frame_dir=None,
+    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, div_type='linear', frame_dir=None, max_cycles=0,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_dividers = n_dividers
         self.n_hidden = n_hidden
+        self.max_cycles = max_cycles
         self.div_type = div_type
         self._shutdown = False
         self._frame_dir = frame_dir
@@ -313,6 +315,11 @@ class UIDisplay(object):
             logging.info("Saved model state to:  %s" % (out_path,))
 
             self._cycle += 1
+
+            if self.max_cycles > 0 and self._cycle >= self.max_cycles:
+                logging.info("Reached max cycles (%i), stopping." % (self.max_cycles,))
+                self._shutdown = True
+                break
 
  
         # print FFMPEG command to make a movie from the images
@@ -452,12 +459,13 @@ def get_args():
                                                            " (very flat) gradient.  High values result in divider units not moving very much, too low" +
                                                            " and they don't settle.", type=float, default=5.0)
     parser.add_argument('-f', '--save_frames', help="Save frames during training to this directory (must exist).", type=str, default=None)
+    parser.add_argument('-c', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
     parsed = parser.parse_args()
 
     kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.disp_mult,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
               'downscale': parsed.downscale, 'n_dividers': parsed.n_dividers, 'frame_dir': parsed.save_frames,
-              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden,
+              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'max_cycles': parsed.cycles,
               'div_type': parsed.type, 'learning_rate': parsed.learning_rate}
     return parsed, kwargs
 

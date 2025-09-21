@@ -63,7 +63,7 @@ class CircleLayer(Layer):
         C = K.expand_dims(self.centers)
         sqdist = K.transpose(C-K.transpose(x))**2.0
         dist = K.sqrt(tf.reduce_sum(sqdist, 1))
-        excitation = (radii - dist)
+        excitation = (radii - dist) / radii
 
         @tf.custom_gradient
         def sharp_with_false_grad(excitation_arg):

@@ -387,24 +387,24 @@ class UIDisplay(object):
         while not self._shutdown:
             if artists['train_img'] is None:
                 artists['train_img'] = train_ax.imshow(self._sim.image_train)
-                train_ax.set_title("Training Image, Cycle %i, downscale:  %.2f\n, image_shape: %s" %
-                                   (self._cycle, self._downscale, self._sim.image_train.shape))
+                train_ax.set_title("Training Image %s\nCycle %i, downscale:  %.2f" %
+                                   (self._sim.image_train.shape, self._cycle, self._downscale))
                 train_ax.axis("off")
             else:
                 artists['train_img'].set_data(self._sim.image_train)
-                train_ax.set_title("Training Image, Cycle %i, downscale:  %.2f\n, image_shape: %s" %
-                                   (self._cycle, self._downscale, self._sim.image_train.shape))
+                train_ax.set_title("Training Image %s\nCycle %i, downscale:  %.2f" %
+                                   (self._sim.image_train.shape, self._cycle, self._downscale))
                 train_ax.axis("off")
 
             if self._output_image is not None:
                 # Can take a while to generate the first image
                 if artists['out_img'] is None:
                     artists['out_img'] = out_ax.imshow(self._output_image)
-                    out_ax.set_title("Output Image, shape: %s" % (self._output_image.shape,))
+                    out_ax.set_title("Output Image %s" % (self._output_image.shape,))
                     out_ax.axis("off")
                 else:
                     artists['out_img'].set_data(self._output_image)
-                    out_ax.set_title("Output Image, shape: %s" % (self._output_image.shape,))
+                    out_ax.set_title("Output Image %s" % (self._output_image.shape,))
                     out_ax.axis("off")
                     out_ax.set_aspect('equal')
 
@@ -442,14 +442,15 @@ def get_args():
 
     parser = argparse.ArgumentParser(description="Learn an image.",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("-i", "--input_image", help="image to transform", type=str, default=None)
+    parser.add_argument("-t", "--type", help="Type of division unit ('circular' or 'linear' or 'relu').",type=str, default='linear')
     parser.add_argument("-d", "--n_dividers", help="Number of divisions (linear or circular) to use.", type=int, default=1)
     parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
-    parser.add_argument("-t", "--type", help="Type of division unit ('circular' or 'linear' or 'relu').",type=str, default='linear')
-    parser.add_argument("-i", "--input_image", help="image to transform", type=str, default=None)
-    parser.add_argument("-e", "--epochs", help="Number of epochs between frames.", type=int, default=1)
-    parser.add_argument("-x", "--disp_mult", help="Display image dimension multiplier.", type=float, default=1.0)
     parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
     parser.add_argument("-j", "--just_image", help="Just do an image, no training.", action='store_true', default=False)
+    parser.add_argument("-e", "--epochs_per_cycle", help="Number of epochs between frames.", type=int, default=1)
+    parser.add_argument('-c', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
+    parser.add_argument("-x", "--disp_mult", help="Display image dimension multiplier (X training image size).", type=float, default=1.0)
     parser.add_argument("-b", "--border", help="Extrapolate outward from the original shape by this factor.",type=float, default=0.0)
     parser.add_argument("-p", "--downscale", help="downscale image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
     parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
@@ -459,10 +460,9 @@ def get_args():
                                                            " (very flat) gradient.  High values result in divider units not moving very much, too low" +
                                                            " and they don't settle.", type=float, default=5.0)
     parser.add_argument('-f', '--save_frames', help="Save frames during training to this directory (must exist).", type=str, default=None)
-    parser.add_argument('-c', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
     parsed = parser.parse_args()
 
-    kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.disp_mult,
+    kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
               'downscale': parsed.downscale, 'n_dividers': parsed.n_dividers, 'frame_dir': parsed.save_frames,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'max_cycles': parsed.cycles,

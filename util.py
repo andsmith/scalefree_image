@@ -99,6 +99,8 @@ def add_text(image, text_lines, bbox, line_spacing = 1.5, max_font_scale=3.0, mi
             raise ValueError("Unknown justify option: %s" % justify)
         cv2.putText(image, line, (x, y), font_face, font_scale, color, font_thickness, lineType=cv2.LINE_AA)
 
+    #draw_bbox(image, bbox, color=(0, 255, 0), thickness=1)
+
 
 def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
     """ Draw a bounding box on an image

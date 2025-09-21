@@ -31,25 +31,27 @@ from copy import deepcopy
 import argparse
 import json
 from tempfile import tempdir
-from util import add_text, draw_bbox, captioned_frame
+from util import add_text, captioned_frame
 import cv2
 import glob
 import re
 import numpy as np
 
-test_data = {'frame_rate': 15,
+test_data_linear = {'frame_rate': 20,
              'resolution': (0, 0), # use first image size
              'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
-             'title_pause_sec': 2.0,
-             'episode_initial_pause_sec': 1.5,
+             'title_pause_sec': 5.0,
+             'episode_initial_pause_sec': 1.0,
              'episode_final_pause_sec': 3.0,
              'txt_color': (255, 255, 255),
              'bkg_color': (0, 0, 0),
              'title_pad_px': 30,
              'caption_pad_xy': (10, 5),
-             'title': {'main': ('Cut the plane with N lines',
-                                'Color each region to',
-                                'approximate an image.'),
+             'title': {'main': ('Cut the plane with N lines,',
+                                'color each region uniformly.',
+                                 'Reduce error by adjusting',
+                                 'lines to approximate target:',
+                                 '   F(x,y) = (R, G, B)'),
                        'sub1': ('N:  8, 32, 128, 512          ',),
                        'sub2': ('By: Andrew T. Smith, 2025      ',
                                 'github:andsmith/scalefree_image')
@@ -67,6 +69,34 @@ test_data = {'frame_rate': 15,
              }
 
 
+test_data = {'frame_rate': 20,
+             'resolution': (0, 0), # use first image size
+             'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
+             'title_pause_sec': 5.0,
+             'episode_initial_pause_sec': 1.0,
+             'episode_final_pause_sec': 3.0,
+             'txt_color': (255, 255, 255),
+             'bkg_color': (0, 0, 0),
+             'title_pad_px': 30,
+             'caption_pad_xy': (10, 5),
+             'title': {'main': ('Cut the plane with N lines,',
+                                'color each region uniformly.',
+                                 'Reduce error by adjusting',
+                                 'lines to approximate target:',
+                                 '   F(x,y) = (R, G, B)'),
+                       'sub1': ('N:  8, 32, 128, 512          ',),
+                       'sub2': ('By: Andrew T. Smith, 2025      ',
+                                'github:andsmith/scalefree_image')
+                       },
+             'episodes': [
+                 {'input_pattern': r'movies\\mona_lisa_circular_8d_10h_cycle-????????.png',
+                  'caption': ['8 linear dividers', '10 hidden units']},
+                 {'input_pattern': r'movies\\mona_lisa_circular_32d_16h_cycle-????????.png',
+                  'caption': ['32 linear dividers', '10 hidden units']},
+                 {'input_pattern': r'movies\\mona_lisa_circular_512d_64h_cycle-????????.png',
+                  'caption': ['512 linear dividers', '64 hidden units']}
+             ]
+             }
 class MovieMaker(object):
     def __init__(self, movie_json, output_file, preview=False):
         self.movie_json = movie_json
@@ -90,7 +120,7 @@ class MovieMaker(object):
         self.bkg_color = tuple(self.movie_data['bkg_color'])
         #self.episodes = self._load()
 
-    def _make_title_frame(self, size_wh, spacing_frac=0.2):
+    def _make_title_frame(self, size_wh, spacing_frac=0.0):
         """
         +-------------------+
         |   title line 1    |
@@ -103,7 +133,7 @@ class MovieMaker(object):
         |    sub2 line 1    |
         |    sub2 line 2    |
         +-------------------+
-        :param size_wh: (width, height) of the image area
+        :param size_wh: (width, height) of the image area 
         :param pad_px: padding in pixels
         :param spacing_frac: fraction of the image height to use for spacing (between text line groups)
         """
@@ -131,10 +161,10 @@ class MovieMaker(object):
         sub2_bbox = {'x':(pad_px, pad_px+text_width),
                      'y':(y_top, y_top + box_heights[2])}
         
-        frame = np.zeros((size_wh[1]+self.caption_height_px, size_wh[0], 3), dtype=np.uint8)
+        frame = np.zeros((size_wh[1], size_wh[0], 3), dtype=np.uint8)
         frame[:, :] = self.bkg_color
         
-        add_text(frame, self.title_txt['main'], main_bbox,font_face = cv2.FONT_HERSHEY_COMPLEX, font_thickness=2, justify='center',color=self.txt_color)
+        add_text(frame, self.title_txt['main'], main_bbox,font_face = cv2.FONT_HERSHEY_COMPLEX, justify='center',color=self.txt_color,line_spacing=2.5,)
         add_text(frame, self.title_txt['sub1'], sub1_bbox, font_face = cv2.FONT_HERSHEY_SIMPLEX, justify='center', color=self.txt_color)
         add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face = cv2.FONT_HERSHEY_SIMPLEX, justify='left', line_spacing=2.5, color=self.txt_color)
         return frame
@@ -144,12 +174,17 @@ class MovieMaker(object):
         if self.preview:
             self._preview(frames)
         if self.output_file is not None:
+            # Check all frames are the same size
+            frame_size = frames[0].shape[1], frames[0].shape[0]
+            for f in frames:
+                if (f.shape[1], f.shape[0]) != frame_size:
+                    raise ValueError("All frames must have the same size to write movie, but found differing sizes.")
             self._write_movie(frames)
     def _preview(self, frames):
         for i, frame in enumerate(frames):
             cv2.imshow('preview', frame)
             key = cv2.waitKey(int(1000/self.frame_rate))
-            if key == 27:  # ESC
+            if key == 27 or key == ord('q'):
                 break
         cv2.destroyAllWindows()
     def _load_episode_frames(self, episode):
@@ -189,6 +224,7 @@ class MovieMaker(object):
         episode_sequences = [self._make_episode_seq(ep) for ep in self.episode_data]
         frame_size_wh = episode_sequences[0][0].shape[:2][::-1]
         title_frame = self._make_title_frame(frame_size_wh)
+        
         frames = self._mk_seq(title_frame, self.title_dur_sec)
         for seq in episode_sequences:
             frames += seq
@@ -199,24 +235,88 @@ class MovieMaker(object):
         return [frame] * n_frames
     
     def _write_movie(self, frames):
+        if not frames:
+            logging.error("No frames to write")
+            return
+            
+        # Get frame dimensions from first frame and ensure they're consistent
+        first_frame = frames[0]
+        height, width, channels = first_frame.shape
+        
+        # Ensure all frames have the same dimensions
+        for i, frame in enumerate(frames):
+            if frame.shape != first_frame.shape:
+                logging.warning(f"Frame {i} has different shape {frame.shape}, resizing to {first_frame.shape}")
+                frames[i] = cv2.resize(frame, (width, height))
+        
+        # Make sure frame dimensions are even (required for yuv420p)
+        if width % 2 != 0:
+            width -= 1
+        if height % 2 != 0:
+            height -= 1
+            
+        # Resize frames to even dimensions if needed
+        if width != first_frame.shape[1] or height != first_frame.shape[0]:
+            logging.info(f"Adjusting frame size to {width}x{height} for yuv420p compatibility")
+            frames = [cv2.resize(frame, (width, height)) for frame in frames]
+        
         cmd = ['ffmpeg',
                '-y',  # overwrite output file if it exists
-               '-framerate', str(self.frame_rate),
-               '-i', 'pipe:',  # input from stdin
+               '-f', 'rawvideo',  # specify input format
+               '-vcodec', 'rawvideo',
+               '-pix_fmt', 'bgr24',  # OpenCV uses BGR format
+               '-s', f'{width}x{height}',  # frame size
+               '-r', str(self.frame_rate),  # input framerate
+               '-i', 'pipe:0',  # input from stdin
                '-c:v', 'libx264',
                '-pix_fmt', 'yuv420p',
+               '-r', str(self.frame_rate),  # output framerate
+               '-preset', 'medium',  # encoding preset
                self.output_file]
+        
         logging.info("Running ffmpeg command:  %s" % (' '.join(cmd),))
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-        for i, frame in enumerate(frames):
-            logging.debug(f"Writing frame {i}")
-            proc.stdin.write(frame.tobytes())
-        proc.stdin.close()
-        proc.wait()
-        if proc.returncode != 0:
-            logging.error(f"ffmpeg exited with code {proc.returncode}")
-        else:
-            logging.info(f"Movie written to {self.output_file}")
+        logging.info(f"Frame dimensions: {width}x{height}, channels: {channels}")
+        
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            
+            for i, frame in enumerate(frames):
+                if proc.poll() is not None:  # Check if process has terminated
+                    logging.error(f"FFmpeg process terminated early at frame {i}")
+                    break
+                    
+                if i % 100 == 0:  # Log progress every 100 frames
+                    logging.info(f"Writing frame {i}/{len(frames)}")
+                    
+                # Ensure frame is contiguous in memory
+                if not frame.flags['C_CONTIGUOUS']:
+                    frame = np.ascontiguousarray(frame)
+                    
+                try:
+                    frame_bytes = frame.tobytes()
+                    expected_size = width * height * channels
+                    if len(frame_bytes) != expected_size:
+                        logging.error(f"Frame {i} size mismatch: got {len(frame_bytes)}, expected {expected_size}")
+                        break
+                    proc.stdin.write(frame_bytes)
+                except BrokenPipeError:
+                    logging.error(f"Broken pipe error at frame {i}")
+                    break
+                    
+            proc.stdin.close()
+            stdout, stderr = proc.communicate()
+            
+            if proc.returncode != 0:
+                logging.error(f"ffmpeg exited with code {proc.returncode}")
+                if stderr:
+                    logging.error(f"ffmpeg stderr: {stderr.decode()}")
+            else:
+                logging.info(f"Movie written to {self.output_file}")
+                
+        except Exception as e:
+            logging.error(f"Error during movie creation: {e}")
+            if 'proc' in locals():
+                proc.terminate()
 
     def _get_files(self, glob_pattern):
         """
@@ -262,10 +362,5 @@ if __name__=="__main__":
         sys.exit(0)
     output_file = args.output_file if args.play is False else None
     movie_maker = MovieMaker(args.movie_json, output_file, preview=args.play)
-    frame = movie_maker._make_title_frame((800, 600))
-
-    print(frame.shape)
-    cv2.imwrite('title_frame.png', frame)
-
     movie_maker.run()
     logging.info(f"Movie saved to:  {args.output_file}")

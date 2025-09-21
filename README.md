@@ -30,6 +30,7 @@ Training on the famous portrait of George Washington by Gilbert Stuart, with N=1
 I.e., cosine for the angle between the vector from center to input and the line.
 
 The Activation of unit $j$ is:
+
 $$
 A_j(X_i) = \tanh(E_j(X_i) * \text{sharpness})
 $$
@@ -40,11 +41,14 @@ Where $\text{sharpness} = 1000.0$ is generally used to make the color boundaries
 Circles are parameterized by center point $(C_x, C_y)$ and radius $r$. Radius parameters are stored/updated as $log(r)$ so $r$ stays nonnegative.  Centers are stored  the same as with lines, i.e. naturally.
 
 The Excitation of circle unit $j$ with centers $C_j$ and radius $R_j$ given input $X_i = (x_i,y_i)$ is defined
+
 $$
 E_j(X_i) = \frac{||X_i - C_j|| - R_j}{R_j}
 $$
+
 I.e. how many radii away the input is from the edge of the circle, negative if inside the circle, down to -1 if at the center, and positive if outside the circle, going to infinity as you go further away.
 The Activation of unit $j$ is the same as for lines:
+
 $$
 A_j(X_i) = \tanh(E_j(X_i) * \text{sharpness})
 $$

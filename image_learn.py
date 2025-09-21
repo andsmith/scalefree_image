@@ -33,7 +33,7 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1, sharpness=1000.0):
+    def __init__(self, n_hidden, n_dividers, div_type, image=None, state=None, batch_size=16, learning_rate=.1, epochs_per_cycle=1, sharpness=1000.0, false_gradient=False):
         """
         :param n_hidden: number of hidden units in the middle
         :param n_dividers: number of input units
@@ -54,6 +54,7 @@ class ScaleInvariantImage(object):
         self.div_type = div_type
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.use_false_gradient = false_gradient
         self._image = image
         self.sharpness = sharpness
 
@@ -130,7 +131,7 @@ class ScaleInvariantImage(object):
         # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
         if self.div_type in DIV_TYPES:
             layer_class = DIV_TYPES[self.div_type]
-            div_layer = layer_class(self.n_dividers, input_shape=(2,), sharpness=self.sharpness)(input) if self.div_type != 'relu' else layer_class(self.n_dividers, input_shape=(2,))(input)
+            div_layer = layer_class(self.n_dividers, use_false_gradient=self.use_false_gradient, input_shape=(2,), sharpness=self.sharpness)(input) if self.div_type != 'relu' else layer_class(self.n_dividers, input_shape=(2,))(input)
         else:
             raise Exception("Unknown division type:  %s, must be one of:  %s." % (self.div_type,
                                                                                   ', '.join(DIV_TYPES.keys())))
@@ -192,7 +193,6 @@ class UIDisplay(object):
         self.n_dividers =    n_dividers
         self.n_hidden = n_hidden
         self.div_type = div_type
-        self._paused = True
         self._shutdown = False
         self._epoch = 0
         self._annotate=False
@@ -303,14 +303,12 @@ class UIDisplay(object):
         logging.info("\tHidden units:  %i" % (self.n_hidden,))
         logging.info("\tTraining samples: %i" % (self._sim._input.shape[0],))
         logging.info("\tSharpness: %f" % (self._sim.sharpness,))
+        logging.info("\tUse false gradient (tanh(cos_theta)) for LineLayer: %s" % (self._sim.use_false_gradient,))
 
         while not self._shutdown:
             logging.info("Training batch_size: %i, cycle: %i" % (self._sim.batch_size, self._cycle))
             if self._shutdown:
                 break
-            elif self._paused:
-                while self._paused and not self._shutdown:
-                    time.sleep(.2)
 
             self._sim.train_more()
 
@@ -358,8 +356,6 @@ class UIDisplay(object):
                  'n_dividers:  %i' % (self.n_dividers,),
                  'n_hidden:  %i' % (self.n_hidden,),
                  'Cycle (of %i epochs):  %i' % (self._epochs_per_cycle, self._cycle,),]
-        if self._paused:
-            lines.append("PAUSED - press 'p' or SPACE to unpause")
         y = 20
         x = 10
         font_scale = 0.75
@@ -379,7 +375,6 @@ class UIDisplay(object):
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(win_name, 600, 600)
         # cv2.setMouseCallback(win_name, self._on_mouse)
-        self._paused = False
         self._start()
 
         while not self._shutdown:
@@ -389,10 +384,6 @@ class UIDisplay(object):
                 logging.info("Shutdown requested, waiting for worker to finish...")
                 self._shutdown = True
                 break
-            elif k == ord('p') or k == 32:  # 'p' or SPACE to pause/unpause
-                self._paused = not self._paused
-                logging.info("Paused set to: %s" % (self._paused,))
-                self._frame = self._make_frame()
             elif k == ord('a'):  # 'a' to toggle annotation
                 self._annotate = not self._annotate
                 logging.info("Annotation set to: %s" % (self._annotate,))
@@ -421,10 +412,11 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--downsample", help="Downsample image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
     parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
     parser.add_argument('-s', "--sharpness", help="Sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear.", type=float, default=1000.0)
+    parser.add_argument("--use_false_gradient", help="Use false gradient (tanh(cos_theta)) for LineLayer instead of sharp gradient.", action='store_true', default=True)
     parsed = parser.parse_args()
 
     kwargs = {'epochs_per_cycle': parsed.epochs, 'display_multiplier': parsed.mult,
-              'border': parsed.border, 'sharpness': parsed.sharpness,
+              'border': parsed.border, 'sharpness': parsed.sharpness,'false_gradient': parsed.use_false_gradient,
               'downsample': parsed.downsample, 'n_dividers': parsed.n_dividers,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden,
               'div_type': parsed.type, 'learning_rate': parsed.learning_rate}

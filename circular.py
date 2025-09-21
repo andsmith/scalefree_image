@@ -5,6 +5,7 @@ from tensorflow.keras.initializers import RandomUniform, Initializer, Constant
 import numpy as np
 import logging
 
+
 class InitRadiiRandom(Initializer):
     """ Initializer for initialization of standard deviation
     """
@@ -15,8 +16,9 @@ class InitRadiiRandom(Initializer):
 
     def __call__(self, shape, dtype=None, **kwargs):
         spread = [.01, 1.0]
-        sigmas = (np.random.rand(self._num) - spread[0]) * (spread[1] - spread[0])**5.0  # bias towards smaller radii
-        sigmas = np.clip(sigmas, 0.01, 1.0)
+        sigmas = (np.random.rand(self._num) - spread[0]) * (spread[1] - spread[0])
+        sigmas = sigmas ** 5.0  # bias towards smaller radii (does this do anything?)
+        sigmas = np.clip(sigmas, 0.005, 1.0)
         return sigmas
 
 
@@ -25,6 +27,7 @@ class CircleLayer(Layer):
     Layer of circular units, trainable paramters are center (x,y) and radius r
 
     """
+
     def __init__(self, output_dim, sharpness=1000.0, grad_sharpness=3.0, initializer=None, **kwargs):
         self.output_dim = output_dim
         self._sharpness = sharpness
@@ -41,7 +44,7 @@ class CircleLayer(Layer):
         logging.info(f"CircleLayer initialized with grad_sharpness={self.grad_sharpness}, sharpness={self._sharpness}")
 
     def build(self, input_shape):
-        self.centers = self.add_weight(name='centers', 
+        self.centers = self.add_weight(name='centers',
                                        shape=(self.output_dim, input_shape[1]),
                                        initializer=self.initializer,
                                        trainable=True)
@@ -49,8 +52,8 @@ class CircleLayer(Layer):
                                      shape=(self.output_dim,),
                                      initializer=InitRadiiRandom(self.output_dim),
                                      trainable=True)
-        self.sharpness = self.add_weight(name = 'sharpness',
-                                         shape = (self.output_dim,),
+        self.sharpness = self.add_weight(name='sharpness',
+                                         shape=(self.output_dim,),
                                          initializer=Constant(self._sharpness),
                                          trainable=False)
         super(CircleLayer, self).build(input_shape)
@@ -60,7 +63,7 @@ class CircleLayer(Layer):
         C = K.expand_dims(self.centers)
         sqdist = K.transpose(C-K.transpose(x))**2.0
         dist = K.sqrt(tf.reduce_sum(sqdist, 1))
-        excitation = (radii - dist) 
+        excitation = (radii - dist)
 
         @tf.custom_gradient
         def sharp_with_false_grad(excitation_arg):
@@ -69,9 +72,10 @@ class CircleLayer(Layer):
 
             def grad_fn(dy):
                 # Backward pass: gradient of tanh(cos_theta) instead of tanh(sharpness * cos_theta)
-                false_grad =( 1.0 - K.tanh(excitation_arg*self.grad_sharpness)**2)  * self.grad_sharpness  # derivative of tanh(cos_theta)
+                false_grad = (1.0 - K.tanh(excitation_arg*self.grad_sharpness)**2) * \
+                    self.grad_sharpness  # derivative of tanh(cos_theta)
                 return dy * false_grad
-            
+
             return forward_result, grad_fn
 
         activation = sharp_with_false_grad(excitation)

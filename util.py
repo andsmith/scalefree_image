@@ -2,13 +2,13 @@ import numpy as np
 
 
 
-def make_input_grid( img_shape=None,resolution=1.0,margin=0.0):
+def make_input_grid( img_shape=None,resolution=1.0,border=0.0):
     """ Make a grid of input coordinates in [-1,1]x[-1,1]
     img_shape: (height, width, channels)
     resolution: scaling factor for number of points (1.0 = one point per pixel)
-    margin: extra margin around [-1,1]x[-1,1] (in input coordinates)
+    border: extra border around [-1,1]x[-1,1] (in input coordinates)
     """
-    scale = margin + 1.0
+    scale = border + 1.0
 
     h, w = img_shape[0]*resolution, img_shape[1]*resolution
     xs = (((np.arange(w, dtype=np.float32)+.5) / float(w) * 2.0 - 1.0) * scale)

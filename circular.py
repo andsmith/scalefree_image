@@ -3,7 +3,7 @@ from tensorflow.keras import backend as K
 from tensorflow.keras.layers import Layer
 from tensorflow.keras.initializers import RandomUniform, Initializer, Constant
 import numpy as np
-
+import logging
 
 class InitRadiiRandom(Initializer):
     """ Initializer for initialization of standard deviation
@@ -25,9 +25,10 @@ class CircleLayer(Layer):
     Layer of circular units, trainable paramters are center (x,y) and radius r
 
     """
-    def __init__(self, output_dim, sharpness=1000.0, initializer=None, **kwargs):
+    def __init__(self, output_dim, sharpness=1000.0, grad_sharpness=3.0, initializer=None, **kwargs):
         self.output_dim = output_dim
         self._sharpness = sharpness
+        self.grad_sharpness = grad_sharpness
 
         if not initializer:
             self.initializer = RandomUniform(-1.0, 1.0)
@@ -37,6 +38,7 @@ class CircleLayer(Layer):
         self.radii = None
         self.sharpness = None
         super(CircleLayer, self).__init__(**kwargs)
+        logging.info(f"CircleLayer initialized with grad_sharpness={self.grad_sharpness}, sharpness={self._sharpness}")
 
     def build(self, input_shape):
         self.centers = self.add_weight(name='centers', 
@@ -54,14 +56,27 @@ class CircleLayer(Layer):
         super(CircleLayer, self).build(input_shape)
 
     def call(self, x):
-        sharp = self.sharpness
         radii = K.log(1.0 + K.exp(self.radii))  # all radii must be positive, so use the soft-ReLu transform
         C = K.expand_dims(self.centers)
         sqdist = K.transpose(C-K.transpose(x))**2.0
         dist = K.sqrt(tf.reduce_sum(sqdist, 1))
-        r = (radii - dist)  * sharp
-        p = K.tanh(r)
-        return p
+        excitation = (radii - dist) 
+
+        @tf.custom_gradient
+        def sharp_with_false_grad(excitation_arg):
+            # Forward pass: sharp activation
+            forward_result = K.tanh(self.sharpness * excitation_arg)
+
+            def grad_fn(dy):
+                # Backward pass: gradient of tanh(cos_theta) instead of tanh(sharpness * cos_theta)
+                false_grad =( 1.0 - K.tanh(excitation_arg*self.grad_sharpness)**2)  * self.grad_sharpness  # derivative of tanh(cos_theta)
+                return dy * false_grad
+            
+            return forward_result, grad_fn
+
+        activation = sharp_with_false_grad(excitation)
+
+        return activation
 
     def compute_output_shape(self, input_shape):
         return input_shape[0], self.output_dim

@@ -61,6 +61,10 @@ class ScaleInvariantImage(object):
         self._downscale_level = None
         self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
+
+        # Cache this
+        self._last_downscale = None
+        self._input, self._output = None, None
         
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
@@ -90,7 +94,10 @@ class ScaleInvariantImage(object):
         logging.info("Model compiled with learning_rate:  %f" % (self.learning_rate,))
 
     def _make_train(self, downscale, keep_aspect=True):
-        
+        if self._last_downscale is not None and self._last_downscale == downscale:
+            return self._input, self._output
+        self._last_downscale = downscale
+
         self._downscale_level = downscale
         self.image_train = downscale_image(self.image_raw, self._downscale_level)
 
@@ -102,6 +109,7 @@ class ScaleInvariantImage(object):
         output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
         logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f], %i samples total." %
                      (grid_shape, input[:, 0].min(), input[:, 0].max(), input[:, 1].min(), input[:, 1].max(), input.shape[0]))
+        self._input, self._output = input, output
         return input, output
 
     def _init_model(self):
@@ -142,8 +150,8 @@ class ScaleInvariantImage(object):
         input, output = self._make_train(downscale)
 
         # Save numpy training set:
-        np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
-        print("SAVED Numpy TEST data to file: training_data.npz")
+        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
+        # print("SAVED Numpy TEST data to file: training_data.npz")
 
         rand = np.random.permutation(input.shape[0])
         input = input[rand]
@@ -205,7 +213,7 @@ class ScaleInvariantImage(object):
             raise Exception("State file doesn't exist:  %s" % (model_filepath,))
         with open(model_filepath, 'rb') as infile:
             state = cp.load(infile)
-        print("Loaded model state from:  %s, n_weight_layers: %i" % (model_filepath, len(state['weights'])))
+        print("Loaded model state from:  %s, n_weight_layers: %i, at cycle: %i" % (model_filepath, len(state['weights']), state['cycle']))
 
         return state
     
@@ -304,8 +312,18 @@ class UIDisplay(object):
             return "%s_output_%s_cycle-%.8i.png" % (self._file_prefix, self._get_arch_str(), self._sim.cycle)
         elif which=='single-image':
             return "%s_single_%s.png" % (self._file_prefix, self._get_arch_str())
+        elif which =='train-image':
+            return "%s_train_%s_downscale=%.1f.png" % (self._file_prefix, self._get_arch_str(), self._downscale)
         else:
             raise Exception("Unknown filename type:  %s" % (which,))
+
+    def _save_training_image(self):
+        filename = self.get_filename('train-image')
+        #file_path = os.path.join(self._frame_dir, filename) if self._frame_dir is not None else filename
+        file_path = filename
+        train_img = (self._sim.image_train * 255.0).astype(np.uint8)
+        cv2.imwrite(file_path, train_img[:, :, ::-1])
+        logging.info("Wrote training image:  %s" % (file_path,))
 
     def _train_thread(self):
         # TF 2.x doesn't use sessions or graphs in eager 
@@ -335,6 +353,9 @@ class UIDisplay(object):
                          (self._sim.batch_size, self._sim.cycle, self._downscale))
 
             new_losses = self._sim.train_more(self._epochs_per_cycle, downscale=self._downscale)
+
+
+            self._save_training_image()
  
             self._loss_history.append(new_losses)
 
@@ -378,6 +399,9 @@ class UIDisplay(object):
 
     def _write_frame(self, img):
         if self._frame_dir is not None:
+            if not os.path.exists(self._frame_dir):
+                os.makedirs(self._frame_dir)
+                logging.info("Created frame directory:  %s" % (self._frame_dir,))
             out_filename = self.get_filename('frame')
             out_path = os.path.join(self._frame_dir, out_filename)
             if os.path.exists(out_path):

@@ -23,6 +23,7 @@ Each episode is a dictionary with keys:
     "resolution": (width, height)  # optional, if present and not (0, 0), resize frames to this resolution
          otherwise use the frame's native resolution (and issue warnings if they differ)
 """
+import time
 import os
 import subprocess
 import logging
@@ -37,7 +38,7 @@ import glob
 import re
 import numpy as np
 
-test_data_linear = {'frame_rate': 20,
+test_data_linear = {'frame_rate': 30,
                     'resolution': (0, 0),  # use first image size
                     'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
                     'title_pause_sec': 5.0,
@@ -71,7 +72,7 @@ test_data_linear = {'frame_rate': 20,
                     }
 
 
-test_data_circular = {'frame_rate': 20,
+test_data_circular = {'frame_rate': 30,
                       'resolution': (0, 0),  # use first image size
                       'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
                       'title_pause_sec': 5.0,
@@ -112,9 +113,10 @@ test_data = {'frame_rate': 20,
              'bkg_color': (0, 0, 0),
              'title_pad_px': 30,
              'caption_pad_xy': (10, 5),
+             
              'title': {'main': ('Optimal image approximation',
                                 'with 50 lines, 50 circles.'),
-                       'sub1': ('learn rates: 0.1, 0.01, 0.001,',
+                       'sub1': ('learn rates: 0.1, 0.01',
                                 '            500 epochs each,',
                                 '            1 frame = 25 epochs.'),
                        'sub2': ('By:  Andrew T. Smith, 2025',
@@ -122,13 +124,17 @@ test_data = {'frame_rate': 20,
                        'spacing_frac': 0.2,
                        'max_font_scales': (None, 1.2, None)
                        },
+             'train_img': {'file': 'barn_train_15c-15l_20h_downscale=3.0.png',
+                           'caption': ['training image (198 x 109)'],
+                           'duration_sec': 5.0},
              'episodes': [
                  {'input_pattern': r'movie\\barn_linear_50d_20h_cycle-????????.png',
                   'caption': ['50 line units', '20 color units']},
                  {'input_pattern': r'movie\\barn_circular_50d_20h_cycle-????????.png',
                      'caption': ['50 circle units', '20 color units']},
                  {'input_pattern': r'movie\\barn_output_15c-15l_20h_cycle-????????.png',
-                     'caption': ['15 line units + 15 circle units', '20 color units']}
+                     'caption': ['15 line units + 15 circle units, 20 color units',
+                                 'epochs@LR: 250@1.0, 500@0.1, 500@0.01, 500@0.001']},
              ]
              }
 
@@ -172,7 +178,7 @@ class MovieMaker(object):
         :param pad_px: padding in pixels
         :param spacing_frac: fraction of the image height to use for spacing (between text line groups)
         """
-        print("SPACING FRACTION: ", spacing_frac)
+
         pad_px = self.title_pad_px
         text_height = size_wh[1]-2*pad_px
         pad_height = int(spacing_frac*text_height) // 2
@@ -225,11 +231,36 @@ class MovieMaker(object):
             self._write_movie(frames)
 
     def _preview(self, frames):
+        t0=time.perf_counter()
+        last_time = t0 - 10.0
+        n_frames = 0
+        max_delay = 1.0 / self.frame_rate
+        sleep_times = []
+
         for i, frame in enumerate(frames):
+            now = time.perf_counter()
+            delay = now - last_time
+            sleep_time = max_delay - delay
+            
+            sleep_times.append(sleep_time)
+
+            if sleep_time > 0:
+                time.sleep(sleep_time)
             cv2.imshow('preview', frame)
-            key = cv2.waitKey(int(1000/self.frame_rate))
+            n_frames += 1
+            last_time = time.perf_counter()
+
+            if n_frames % 30 == 0:
+                elapsed = now - t0
+                actual_fps = n_frames / elapsed if elapsed > 0 else 0
+                logging.info(f"Preview frame {i}, actual fps: {actual_fps:.2f}")
+                t0 = now
+                n_frames = 0
+
+            key = cv2.waitKey(1)
             if key == 27 or key == ord('q'):
                 break
+
         cv2.destroyAllWindows()
 
     def _load_episode_frames(self, episode):

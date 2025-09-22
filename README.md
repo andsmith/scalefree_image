@@ -1,4 +1,4 @@
-# scalefree_image
+# Scale-free Image representation.
 
 How can you best approximate an image if you're constrained to partitioning it with N arbitrarily placed lines and coloring every pixel in each partition the same color?  What about N circles?
 
@@ -17,7 +17,7 @@ Training on the famous portrait of George Washington by Gilbert Stuart, with N=1
 
 ### Overview - line units
 
-Lines are parameterized by center point $(C_x, C_y)$ and angle $\theta$.  The error  derivative is computed with respect to these parameters, in that form.
+Lines are parameterized by center point $(C_x, C_y)$ and angle $\theta$.  The error  derivative is computed with respect to these parameters, in effect, moving / rotating the lines to reduce error.  Centers are stored naturally, i.e. $C_x$ and $C_y$ are unconstrained and can be any real number.
 
 The Excitation of line unit $j$ with centers $C_j$ and angles $\theta_j$ given input $X_i = (x_i,y_i)$ is defined 
 
@@ -36,9 +36,9 @@ $$
 Where $\text{sharpness} = 1000.0$ is generally used to make the color boundaries very sharp.  This means almost all inputs are either very close to -1 or +1.  To prevent the flat graidents from keeping the lines still during training, we use a false gradient, the derivative with a much smaller sharpness.  The default vaule for this parameter, `grad_sharpness`, is 5.0.
 
 ### Overview - circle units
-Circles are parameterized by center point $(C_x, C_y)$ and radius $r$. Radius parameters are stored/updated as $log(r)$ so $r$ stays nonnegative.  Centers are stored  the same as with lines, i.e. naturally.
+Circles are parameterized by center point $(C_x, C_y)$ and radius $R$. Radius parameters are stored/updated as $r=log(R)$ so $R$ stays nonnegative.  Centers are stored  the same as with lines, i.e. naturally.
 
-The Excitation of circle unit $j$ with centers $C_j$ and radius $R_j$ given input $X_i = (x_i,y_i)$ is defined
+The Excitation of circle unit $j$ with centers $C_j$ and radius $R_j = \exp(r_j)$ given input $X_i = (x_i,y_i)$ is defined
 
 $$
 E_j(X_i) = \frac{||X_i - C_j|| - R_j}{R_j}

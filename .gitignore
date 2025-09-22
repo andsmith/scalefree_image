@@ -6,6 +6,9 @@ __pycache__/
 *.jpg
 *.mp4
 *.keras
+*.pkl
+*.json
+*.npz
 # C extensions
 *.so
 

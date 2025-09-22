@@ -54,61 +54,88 @@ test_data_linear = {'frame_rate': 20,
                                        '   F(x,y) = (R, G, B)'),
                               'sub1': ('N:  8, 32, 128, 512          ',),
                               'sub2': ('By: Andrew T. Smith, 2025      ',
-                                       'github:andsmith/scalefree_image')
+                                       'github:andsmith/scalefree_image'),
+                              'spacing_frac': 0.1,
+
                               },
                     'episodes': [
                         {'input_pattern': r'movies\\washington_linear_8d_10h_cycle-????????.png',
-                         'caption': ['8 linear dividers', '10 hidden units']},
+                         'caption': ['8 line units', '10 color units']},
                         {'input_pattern': r'movies\\washington_linear_32d_10h_cycle-????????.png',
-                         'caption': ['32 linear dividers', '10 hidden units']},
+                         'caption': ['32 line units', '10 color units']},
                         {'input_pattern': r'movies\\washington_linear_128d_32h_cycle-????????.png',
-                         'caption': ['128 linear dividers', '32 hidden units']},
+                         'caption': ['128 line units', '32 color units']},
                         {'input_pattern': r'movies\\washington_linear_512d_64h_cycle-????????.png',
-                         'caption': ['512 linear dividers', '64 hidden units']}
+                         'caption': ['512 line units', '64 color units']}
                     ]
                     }
 
 
+test_data_circular = {'frame_rate': 20,
+                      'resolution': (0, 0),  # use first image size
+                      'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
+                      'title_pause_sec': 5.0,
+                      'episode_initial_pause_sec': 1.0,
+                      'episode_final_pause_sec': 3.0,
+                      'txt_color': (255, 255, 255),
+                      'bkg_color': (0, 0, 0),
+                      'title_pad_px': 30,
+                      'caption_pad_xy': (10, 5),
+                      'title': {'main': ('Cut the plane with N circles.',
+                                'Color each region uniformly.',
+                                         'Pick circle size/position',
+                                         'and color intersections to',
+                                         'best approximate target.'),
+                                'sub1': ('N:  8, 32, 128, 512          ',),
+                                'sub2': ('By: Andrew T. Smith, 2025      ',
+                                         'github:andsmith/scalefree_image'),
+                                'spacing_frac': 0.1,
+                                },
+                      'episodes': [
+                          {'input_pattern': r'movies\\mona_lisa_circular_8d_10h_cycle-????????.png',
+                           'caption': ['8 circle units', '10 color units']},
+                          {'input_pattern': r'movies\\mona_lisa_circular_32d_16h_cycle-????????.png',
+                           'caption': ['32 circle units', '16 color units']},
+                          {'input_pattern': r'movies\\mona_lisa_circular_128d_24h_cycle-????????.png',
+                           'caption': ['128 circle units', '24 color units']},
+                          {'input_pattern': r'movies\\mona_lisa_circular_512d_64h_cycle-????????.png',
+                           'caption': ['512 circle units', '64 color units']}
+                      ]
+                      }
 test_data = {'frame_rate': 20,
              'resolution': (0, 0),  # use first image size
              'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
-             'title_pause_sec': 5.0,
-             'episode_initial_pause_sec': 1.0,
-             'episode_final_pause_sec': 3.0,
+             'title_pause_sec': 2.0,
+             'episode_initial_pause_sec': 2.0,
+             'episode_final_pause_sec': 4.0,
              'txt_color': (255, 255, 255),
              'bkg_color': (0, 0, 0),
              'title_pad_px': 30,
              'caption_pad_xy': (10, 5),
-             'title': {'main': ('Cut the plane with N circles.',
-                                'Color each region uniformly.',
-                                'Pick circle size/position',
-                                'and color intersections to',
-                                'best approximate target.'),
-                       'sub1': ('N:  8, 32, 128, 512          ',),
-                       'sub2': ('By: Andrew T. Smith, 2025      ',
-                                'github:andsmith/scalefree_image')
+             'title': {'main': ('Optimal image approximation',
+                                'with 50 lines, 50 circles.'),
+                       'sub1': ('learn rates: 0.1, 0.01, 0.001,',
+                                '            500 epochs each,',
+                                '            1 frame = 25 epochs.'),
+                       'sub2': ('By:  Andrew T. Smith, 2025',
+                                'github: andsmith/scalefree_image',),
+                       'spacing_frac': 0.2,
+                       'max_font_scales': (None, 1.2, None)
                        },
              'episodes': [
-                 {'input_pattern': r'movies\\mona_lisa_circular_8d_10h_cycle-????????.png',
-                  'caption': ['8 circle units', '10 color units']},
-                 {'input_pattern': r'movies\\mona_lisa_circular_32d_16h_cycle-????????.png',
-                  'caption': ['32 circle units', '16 color units']},
-                 {'input_pattern': r'movies\\mona_lisa_circular_128d_24h_cycle-????????.png',
-                  'caption': ['128 circle units', '24 color units']},
-                 {'input_pattern': r'movies\\mona_lisa_circular_512d_64h_cycle-????????.png',
-                  'caption': ['512 circle units', '64 color units']}
+                 {'input_pattern': r'movie\\barn_linear_50d_20h_cycle-????????.png',
+                  'caption': ['50 line units', '20 color units']},
+                 {'input_pattern': r'movie\\barn_circular_50d_20h_cycle-????????.png',
+                     'caption': ['50 circle units', '20 color units']}
              ]
              }
 
 
 class MovieMaker(object):
-    def __init__(self, movie_json, output_file, preview=False):
-        self.movie_json = movie_json
+    def __init__(self, movie_data, output_file, preview=False):
+        self.movie_data = movie_data
         self.output_file = output_file
         self.preview = preview
-
-        with open(movie_json, 'r') as f:
-            self.movie_data = json.load(f)
 
         self.frame_rate = self.movie_data['frame_rate']
         self.caption_height_px = self.movie_data['caption_height_px']
@@ -122,9 +149,11 @@ class MovieMaker(object):
         self.title_dur_sec = self.movie_data['title_pause_sec']
         self.txt_color = tuple(self.movie_data['txt_color'])
         self.bkg_color = tuple(self.movie_data['bkg_color'])
+        self._title_spacing_frac = self.movie_data['title']['spacing_frac']
+        self._max_title_font_scales = self.movie_data['title'].get('max_font_scales', (None, None, None))
         # self.episodes = self._load()
 
-    def _make_title_frame(self, size_wh, spacing_frac=0.0):
+    def make_title_frame(self, size_wh, spacing_frac=0.0, max_font_scales=(None, None, None)):
         """
         +-------------------+
         |   title line 1    |
@@ -141,6 +170,7 @@ class MovieMaker(object):
         :param pad_px: padding in pixels
         :param spacing_frac: fraction of the image height to use for spacing (between text line groups)
         """
+        print("SPACING FRACTION: ", spacing_frac)
         pad_px = self.title_pad_px
         text_height = size_wh[1]-2*pad_px
         pad_height = int(spacing_frac*text_height) // 2
@@ -168,13 +198,16 @@ class MovieMaker(object):
 
         frame = np.zeros((size_wh[1], size_wh[0], 3), dtype=np.uint8)
         frame[:, :] = self.bkg_color
-
+        kwargs = {} if max_font_scales[0] is None else {'max_font_scale': max_font_scales[0]}
         add_text(frame, self.title_txt['main'], main_bbox, font_face=cv2.FONT_HERSHEY_COMPLEX,
-                 justify='center', color=self.txt_color, line_spacing=2.5,)
-        add_text(frame, self.title_txt['sub1'], sub1_bbox,
-                 font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='center', color=self.txt_color)
+                 justify='center', color=self.txt_color, line_spacing=2.5, **kwargs)
+
+        kwargs = {} if max_font_scales[1] is None else {'max_font_scale': max_font_scales[1]}
+        add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=2.5,
+                 font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='left', color=self.txt_color, **kwargs)
+        kwargs = {} if max_font_scales[2] is None else {'max_font_scale': max_font_scales[2]}
         add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
-                 justify='left', line_spacing=2.5, color=self.txt_color)
+                 justify='left', line_spacing=2.5, color=self.txt_color, **kwargs)
         return frame
 
     def run(self):
@@ -236,8 +269,9 @@ class MovieMaker(object):
     def _make_frame_sequence(self):
         episode_sequences = [self._make_episode_seq(ep) for ep in self.episode_data]
         frame_size_wh = episode_sequences[0][0].shape[:2][::-1]
-        title_frame = self._make_title_frame(frame_size_wh)
-
+        title_frame = self.make_title_frame(frame_size_wh,
+                                            spacing_frac=self._title_spacing_frac,
+                                            max_font_scales=self._max_title_font_scales)
         frames = self._mk_seq(title_frame, self.title_dur_sec)
         for seq in episode_sequences:
             frames += seq
@@ -357,10 +391,13 @@ class MovieMaker(object):
 
 def get_args():
     parser = argparse.ArgumentParser(description="Make a movie from frames")
-    parser.add_argument('movie_json', type=str, help="Json file describing the movie")
-    parser.add_argument('output_file', type=str, help="Output movie file, e.g. movie.mp4")
+    parser.add_argument('-m', '--movie_json', type=str,
+                        help="Json file describing the movie (uses test_data in make_movie.py if not provided)", default=None)
+    parser.add_argument('-o', '--output_file', type=str,
+                        help="Output movie file, e.g. movie.mp4, if not provided will just generate a title card.", default=None)
     parser.add_argument('-p', '--play', action='store_true', help="Play the movie, don't create it.", default=False)
-    parser.add_argument('-e', '--example', action='store_true', help="Write example JSON movie file.", default=False)
+    parser.add_argument('-j', '--write_json', type=str,
+                        help="Don't make/play a movie, just write the JSON to this file (useful with no -m argument, generate a template.)", default=None)
 
     return parser.parse_args()
 
@@ -368,14 +405,41 @@ def get_args():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     args = get_args()
-    if args.example:
-        example = deepcopy(test_data)
 
-        with open('example_movie.json', 'w') as f:
-            json.dump(example, f, indent=4)
-        logging.info("Wrote example_movie.json")
+    # load data
+    if args.movie_json is None:
+
+        movie_data = deepcopy(test_data)
+        logging.info("No movie json file provided, using built-in test data, has %i episodes." %
+                     (len(movie_data['episodes']),))
+    else:
+        with open(args.movie_json, 'r') as f:
+            movie_data = json.load(f)
+        logging.info(f"Loaded movie json file:  {args.movie_json}, has {len(movie_data['episodes'])} episodes.")
+
+    if args.write_json:
+        with open(args.write_json, 'w') as f:
+            json.dump(movie_data, f, indent=4)
+        logging.info(f"Wrote {args.write_json}")
         sys.exit(0)
-    output_file = args.output_file if args.play is False else None
-    movie_maker = MovieMaker(args.movie_json, output_file, preview=args.play)
+
+    # We need a MovieMaker to generate an mp4, play the movie, and/or make a title card.
+    if args.output_file is None and args.play is False:
+        movie_maker = MovieMaker(movie_data, None, preview=False)
+
+        # Just make a title card
+        # Use 800x600 as a reasonable default size
+        title_frame = movie_maker.make_title_frame((800, 600),
+                                                   movie_data['title']['spacing_frac'],
+                                                   max_font_scales=movie_data['title']['max_font_scales'])
+        cv2.imwrite('example_title.png', title_frame)
+        logging.info("No output mp4 file provided, wrote title frame to: example_title.png")
+        sys.exit(0)
+
+    if args.play:
+        logging.info("Playing movie preview...")
+        movie_maker = MovieMaker(movie_data, None, preview=True)
+    elif args.output_file is not None:
+        logging.info(f"Creating movie file:  {args.output_file}")
+        movie_maker = MovieMaker(movie_data, args.output_file, preview=False)
     movie_maker.run()
-    logging.info(f"Movie saved to:  {args.output_file}")

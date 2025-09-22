@@ -57,6 +57,10 @@ $$
 
 The number of partitions N lines can create is at most N(N-1)/2 + N + 1.  Ultimately, the size of the color choosing layer should take this into account, as well as the complexity and diversity of colors in the target image, but there is no automated way to predict this yet.
 
+### Combining types.
+
+We can use L lines and C circles together by having L + C divider units in the first layer, the first L being line units and the next C being circle units.  The rest of the network is unchanged.  Use parameters `--circles C --lines L` in the app to specify this.
+
 #### Why this is "scale free"
 
 We are training to learn f(x,y) = (r,g,b) for all pixels of an image.
@@ -79,9 +83,12 @@ options:
   -h, --help            show this help message and exit
   -i INPUT_IMAGE, --input_image INPUT_IMAGE
                         image to transform (default: None)
-  -t TYPE, --type TYPE  Type of division unit ('circular' or 'linear' or 'relu'). (default: linear)
-  -d N_DIVIDERS, --n_dividers N_DIVIDERS
-                        Number of divisions (linear or circular) to use. (default: 1)
+  -c CIRCLES, --circles CIRCLES
+                        Number of circular division units. (default: 0)
+  -l LINES, --lines LINES
+                        Number of linear division units. (default: 0)
+  -s SIGMOIDS, --sigmoids SIGMOIDS
+                        Number of sigmoid division units. (default: 0)
   -n N_HIDDEN, --n_hidden N_HIDDEN
                         Number of hidden_units units in the model. (default: 64)
   -m MODEL_FILE, --model_file MODEL_FILE
@@ -97,20 +104,22 @@ options:
                         Extrapolate outward from the original shape by this factor. (default: 0.0)
   -p DOWNSCALE, --downscale DOWNSCALE
                         downscale image by this factor, speeds up training at the cost of detail. (default: 1.0)
-  -l LEARNING_RATE, --learning_rate LEARNING_RATE
+  -r LEARNING_RATE, --learning_rate LEARNING_RATE
                         Learning rate for the optimizer. (default: 0.01)
-  -s SHARPNESS, --sharpness SHARPNESS
+  -a SHARPNESS, --sharpness SHARPNESS
                         Sharpness constant for activation function, activation(excitation) = tanh(excitation*sharpness). (default: 1000.0)
   -g GRADIENT_SHARPNESS, --gradient_sharpness GRADIENT_SHARPNESS
                         Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual (very flat) gradient. High values result in divider units not moving very much, too low and they don't settle. (default: 5.0)
   -f SAVE_FRAMES, --save_frames SAVE_FRAMES
                         Save frames during training to this directory (must exist). (default: None)
 ```
+
 Important arguments:
   * **input_image**: image to learn / approximate
-* **n_dividers**: number of line or circle units to use, i.e. first layer size
+* **circles**: number of circular units to use in the first layer.
+* **lines**: number of linear units to use in the first layer.
+* **sigmoids**: number of (traditional) sigmoid units to use  in the first layer. (all three types can be used together in any combination)
 * **n_hidden**: number of ReLu units in the color choosing layer, second layer size
-* **type**: 'linear' for line units, 'circular' for circle units
 * **epochs_per_cycle**: number of epochs to run between display updates (regenerating the image output)
 * **cycles**: number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.
 * **downscale**: downscale image by this factor for training, speeds up training, very useful especially with small networks.

@@ -30,7 +30,7 @@ class NormalLayer(Layer):
 
     def call(self, x):
         excitation = K.dot(x, K.transpose(self.kernel)) + self.bias
-        p = K.relu(excitation)
+        p = K.tanh(excitation)
         return p
     
     def compute_output_shape(self, input_shape):

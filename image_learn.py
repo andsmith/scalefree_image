@@ -28,7 +28,7 @@ import matplotlib.gridspec as gridspec
 
 from keras.optimizers.schedules import ExponentialDecay
 
-DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'relu': NormalLayer}
+DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'sigmoid': NormalLayer}
 
 
 class ScaleInvariantImage(object):
@@ -38,12 +38,13 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, image_raw, n_hidden, n_dividers, div_type, state_file=None, batch_size=16, learning_rate=.1, sharpness=1000.0, grad_sharpness=3.0):
+    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=16, learning_rate=.1, sharpness=1000.0, grad_sharpness=3.0):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
-        :param n_dividers: number of input units
-        :param div_type: type of division layer, one of DIV_TYPES
+        :param n_div: dictionary containing the number of input units for each division type
+        :param n_div_s: number of input units for sigmoid division
+        :param state_file: if not None, a file to load the model state from (overrides other args except learning rate, batch size)
         :param image: if not None, a HxWx3 or HxW numpy array containing the target image
         :param batch_size: training batch size
         :param learning_rate: learning rate for the optimizer
@@ -52,8 +53,7 @@ class ScaleInvariantImage(object):
         """
         self.image_raw = image_raw
         self.n_hidden = n_hidden
-        self.n_dividers = n_dividers
-        self.div_type = div_type
+        self.n_div = n_div
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.grad_sharpness = grad_sharpness
@@ -67,8 +67,8 @@ class ScaleInvariantImage(object):
             # (so they can be None in the args)
             state = ScaleInvariantImage._load_state(state_file)
             weights = state['weights']
-            self.cycle, self.image_raw, self.n_hidden, self.n_dividers, self.div_type, self.sharpness, self.grad_sharpness = \
-                  state['cycle'], state['image_raw'], state['n_hidden'], state['n_dividers'], state['div_type'], state['sharpness'], state['grad_sharpness']
+            self.cycle, self.image_raw, self.n_hidden, self.n_div,  self.sharpness, self.grad_sharpness = \
+                  state['cycle'], state['image_raw'], state['n_hidden'], state['n_div'], state['sharpness'], state['grad_sharpness']
             # Checks
             if image_raw is not None and image_raw.shape != self.image_raw.shape:
                 logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
@@ -106,26 +106,34 @@ class ScaleInvariantImage(object):
 
     def _init_model(self):
         """
-        Initialize the TF model, either from scratch
-        :param n_hidden: number of hidden units in the middle
-        :param n_dividers: number of input units
+        Initialize the TF model, either from scratch.
+        Layers:
+            input (2)
+            circular (n_c) + linear (n_l) + sigmoid (n_s) units
+            concatenation layer (n_c + n_l + n_r)
+            color unit layer (n_hidden)
+            output (3)
+
         """
 
         # Input is just the (x,y) pixel coordinates (scaled)
         input = Input((2,))
 
-        # Use just a line layer, and some ReLu units to color the regions partitioned by the lines
-        if self.div_type in DIV_TYPES:
-            layer_class = DIV_TYPES[self.div_type]
-            div_layer = layer_class(self.n_dividers, grad_sharpness=self.grad_sharpness, input_shape=(
-                2,), sharpness=self.sharpness)(input) if self.div_type != 'relu' else layer_class(self.n_dividers, input_shape=(2,))(input)
+        div_layers = []
+        for div_type, n_div in self.n_div.items():
+            if n_div > 0:
+                layer = DIV_TYPES[div_type](n_div, sharpness=self.sharpness, grad_sharpness=self.grad_sharpness, name="%s_div_layer" % (div_type,))(input)
+                div_layers.append(layer)
+        if len(div_layers) == 0:
+            raise Exception("Need at least one division unit (circular, linear, or sigmoid).")
+        if len(div_layers) > 1:
+            concat_layer = tf.keras.layers.Concatenate()(div_layers)
         else:
-            raise Exception("Unknown division type:  %s, must be one of:  %s." % (self.div_type,
-                                                                                  ', '.join(DIV_TYPES.keys())))
+            concat_layer = div_layers[0]
 
-        middle = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
-                       kernel_initializer='random_normal')(div_layer)
-        output = Dense(3, use_bias=True, activation=tf.nn.sigmoid)(middle)
+        color_layer = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
+                       kernel_initializer='random_normal')(concat_layer)
+        output = Dense(3, use_bias=True, activation=tf.nn.sigmoid)(color_layer)
         model = Model(inputs=input, outputs=output)
         return model
 
@@ -177,9 +185,8 @@ class ScaleInvariantImage(object):
         data = {'weights': weights,
                 'image_raw': self.image_raw,
                 'cycle': self.cycle,
-                'n_dividers': self.n_dividers,
+                'n_div': self.n_div,
                 'n_hidden': self.n_hidden,
-                'div_type': self.div_type,
                 'sharpness': self.sharpness,
                 'grad_sharpness': self.grad_sharpness
                 }
@@ -191,7 +198,7 @@ class ScaleInvariantImage(object):
         """
         Load a saved state from a file
         :param model_filepath: path to the saved state file
-        :return: the model, image_raw, n_hidden, n_dividers, div_type
+        :return: the model state dict
         """
         if not os.path.exists(model_filepath):
             raise Exception("State file doesn't exist:  %s" % (model_filepath,))
@@ -230,15 +237,14 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, div_type='linear', frame_dir=None, max_cycles=0,
-                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_dividers=40, n_hidden=40, learning_rate=0.001, **kwargs):
+    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, max_cycles=0,
+                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.001, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
-        self.n_dividers = n_dividers
+        self.n_div = n_div
         self.n_hidden = n_hidden
         self.max_cycles = max_cycles
-        self.div_type = div_type
         self._shutdown = False
         self._frame_dir = frame_dir
         self._cycle = 0  # epochs_per_cycle epochs of training and an output update increments this
@@ -259,8 +265,8 @@ class UIDisplay(object):
         # model/image file prefix is the image bare name without extension
         self._file_prefix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
 
-        self._sim = ScaleInvariantImage(n_dividers=n_dividers, n_hidden=n_hidden, learning_rate=self._learning_rate,
-                                        div_type=self.div_type, state_file=state_file, image_raw=self._image_raw, **kwargs)
+        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate=self._learning_rate,
+                                        state_file=state_file, image_raw=self._image_raw, **kwargs)
 
         logging.info("Using output file prefix:  %s" % (self._file_prefix,))
 
@@ -269,22 +275,40 @@ class UIDisplay(object):
 
         self._just_image =  just_image
 
+    def _get_arch_str(self):
+        """
+        for 15 lines and 15 circles + 10 color units, should look like:
+           15c-15l_10h
+        """
+        arch_str = ""
+
+        for div_type in ['circular', 'linear', 'sigmoid']:
+            n_div = self.n_div.get(div_type, 0)
+            if n_div > 0:
+                arch_str += "%i%s-" % (n_div, div_type[0])
+        arch_str = arch_str[:-1]  # remove trailing -
+        arch_str += "_%ih" % (self.n_hidden,)
+        return arch_str
+
     def get_filename(self, which='model'):
         if which == 'model':
-            return "%s_model_%s_%id_%ih.pkl" % (self._file_prefix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden)
+            return "%s_model_%s.pkl" % (self._file_prefix, self._get_arch_str())
         elif which == 'frame':
-            return "%s_%s_%id_%ih_cycle-%.8i.png" % (self._file_prefix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden, self._sim.cycle)
+            return "%s_output_%s_cycle-%.8i.png" % (self._file_prefix, self._get_arch_str(), self._sim.cycle)
         elif which=='single-image':
-            return "%s_single_%s_%id_%ih.png" % (self._file_prefix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden)
+            return "%s_single_%s.png" % (self._file_prefix, self._get_arch_str())
         else:
             raise Exception("Unknown filename type:  %s" % (which,))
 
     def _train_thread(self):
-        # TF 2.x doesn't use sessions or graphs in eager execution
+        # TF 2.x doesn't use sessions or graphs in eager 
+        
+        # Print full model architecture
+        self._sim._model.summary()
+        
         logging.info("Starting training:")
         logging.info("\tBatch size: %i" % (self._sim.batch_size,))
-        logging.info("\tDiv type:  %s" % (self.div_type,))
-        logging.info("\tDivider units:  %i" % (self.n_dividers,))
+        logging.info("\tDiv types:  %s" % (self._get_arch_str(),))
         logging.info("\tHidden units:  %i" % (self.n_hidden,))
         logging.info("\tSharpness: %f" % (self._sim.sharpness,))
         logging.info("\tGradient sharpness: %f" % (self._sim.grad_sharpness,))
@@ -326,7 +350,7 @@ class UIDisplay(object):
         if self._frame_dir is not None:
             logging.info("To make a movie from the images, try:")
             logging.info("  ffmpeg -y -framerate 10 -i %s_%s_%id_%ih_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
-                         (os.path.join(self._frame_dir, self._file_prefix), self.div_type, self.n_dividers, self.n_hidden))
+                         (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str(), self._sim.n_hidden))
 
     def _gen_image(self, shape=None):
         if shape is None:
@@ -457,30 +481,34 @@ def get_args():
     parser = argparse.ArgumentParser(description="Learn an image.",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-i", "--input_image", help="image to transform", type=str, default=None)
-    parser.add_argument("-t", "--type", help="Type of division unit ('circular' or 'linear' or 'relu').",type=str, default='linear')
-    parser.add_argument("-d", "--n_dividers", help="Number of divisions (linear or circular) to use.", type=int, default=1)
+    parser.add_argument("-c", "--circles", help="Number of circular division units.", type=int, default=0)
+    parser.add_argument("-l", "--lines", help="Number of linear division units.", type=int, default=0)
+    parser.add_argument("-s", "--sigmoids", help="Number of sigmoid division units.", type=int, default=0)
+
+
     parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
     parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
     parser.add_argument("-j", "--just_image", help="Just do an image, no training.", action='store_true', default=False)
     parser.add_argument("-e", "--epochs_per_cycle", help="Number of epochs between frames.", type=int, default=1)
-    parser.add_argument('-c', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
+    parser.add_argument('-k', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
     parser.add_argument("-x", "--disp_mult", help="Display image dimension multiplier (X training image size).", type=float, default=1.0)
     parser.add_argument("-b", "--border", help="Extrapolate outward from the original shape by this factor.",type=float, default=0.0)
     parser.add_argument("-p", "--downscale", help="downscale image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
-    parser.add_argument('-l', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
-    parser.add_argument('-s', "--sharpness", help="Sharpness constant for activation function, "+
+    parser.add_argument('-r', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
+    parser.add_argument('-a', "--sharpness", help="Sharpness constant for activation function, "+
                         "activation(excitation) = tanh(excitation*sharpness).", type=float, default=1000.0)
     parser.add_argument("-g", '--gradient_sharpness', help="Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual" +
                                                            " (very flat) gradient.  High values result in divider units not moving very much, too low" +
                                                            " and they don't settle.", type=float, default=5.0)
     parser.add_argument('-f', '--save_frames', help="Save frames during training to this directory (must exist).", type=str, default=None)
     parsed = parser.parse_args()
+    n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
 
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
-              'downscale': parsed.downscale, 'n_dividers': parsed.n_dividers, 'frame_dir': parsed.save_frames,
+              'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'max_cycles': parsed.cycles,
-              'div_type': parsed.type, 'learning_rate': parsed.learning_rate}
+              'learning_rate': parsed.learning_rate}
     return parsed, kwargs
 
 

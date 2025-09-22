@@ -1,12 +1,10 @@
 # scalefree_image
 
-How can you best approximate an image if you're constrained to partitioning it with N varying intersecting lines and coloring every pixel in each partition the same color?  What about N circles?
+How can you best approximate an image if you're constrained to partitioning it with N arbitrarily placed lines and coloring every pixel in each partition the same color?  What about N circles?
 
-We train a neural network whose first layer's represententation cannot distinguish between pixel locations inside the same region.  Computing the color from this information will therefore color all pixels in the same region the same color.
+We train a neural network whose first layer's represententation cannot distinguish between pixel locations inside the same region.  Computing the color from this information, i.e. the task of the rest of the network, will therefore color all pixels in the same region the same color.
 
-Each line unit will indicate which side the input (x, y) is on with a +1 or a -1 output.  Subsequent layers will determine the color but must therefore color every pixel that has the same combination of + and - 1s the same color.  
-
-Circle units will indicate whether the input is inside or outside the circle, again with -1 or +1 respectively.
+Each line unit will indicate which side the input (x, y) is on with a +1 or a -1 output.  Each circle unit will indicate whether the input is inside or outside the circle, again with -1 or +1 respectively.
 
 The full network architecture (3 trainable layers) is:
  * **Inputs (2)**: (x,y) coordinates of pixel, normalized to -1 to +1.
@@ -57,13 +55,13 @@ $$
 
 ### Overview - Color units.
 
-The number of partitions N lines can create is at most N(N-1)/2 + N + 1.  Ultimately, the size of the color choosing layer should take this into accoount, as well as the complexity and diversity of colors in the target image, but this is not yet well understood.
+The number of partitions N lines can create is at most N(N-1)/2 + N + 1.  Ultimately, the size of the color choosing layer should take this into account, as well as the complexity and diversity of colors in the target image, but there is no automated way to predict this yet.
 
 #### Why this is "scale free"
 
-Learn f(x,y) = (r,g,b) for all pixels of an image.
+We are training to learn f(x,y) = (r,g,b) for all pixels of an image.
 
-This is the "scale free" representation of the image.  A function describing the color at any real-valued (x,y) coordinate. You can then create a new image from this representation at any resolution,  or zoom out to see how the representation extrapolates.
+This is the "scale free" representation of the image, a function describing the color at any real-valued (x,y) coordinate. You can then create a new image from this representation at any resolution,  or zoom out to see how the representation extrapolates.
 
 
 # The Application
@@ -127,33 +125,16 @@ run `> python make_movie.py --help` to see options for making movies from saved 
 
 Click the image for a link to a video showing the process with different numbers of linear dividers.  How many does it take for you to recognize the image?
 
-[![Watch lines here](assets/washington_linear_32d_10h_cycle-00000103.png)](https://youtube.com/shorts/in2lN46T8gw?feature=share)
+[![32 linear dividers](assets/washington_linear_32d_10h_cycle-00000103.png)](https://youtube.com/shorts/in2lN46T8gw?feature=share)
 
-Click this image to see the same for 
+Click this image to see the same for circular dividers.
+
+[![32 circular dividers](assets/mona_lisa_circular_32d_16h_cycle-00000112.png)](https://youtube.com/shorts/e53WyUZP48k)
 
 
+####  Gallery
 
-
-#### More Examples
-
-Input image:
-
-![Input image](input/flower-roses-red-roses-bloom_small.jpg?raw=true "input")
-
-Approximated with 100 lines and 500 color choosing ReLu units:
-
-![Input image](output/output_130_redrose_lines_00000003.jpeg?raw=true "input")
-
-Approximated with 100 circles and 500 ReLu units:
-
-![Input image](output/output_131_redrose_circles_00000002.jpeg?raw=true "input")
-
-Approximated with 100 lines and 100 circles and 500 ReLu units:
-
-![Input image](output/output_132_redrose_circles_00000003.jpeg?raw=true "input")
-
-Same as previous approximation, but higher resolution (`-x 5`)
-
+Rose, approximated with 100 lines and 100 circles:
 ![Input image](output/output_132_redrose_circles_00000005.jpeg?raw=true "input")
 
 
@@ -167,7 +148,10 @@ Circle approximation, zoomed out, high res (`-b 3 -x 4`).
 ![Input image](output/output_131_redrose_circles_00000003.jpeg?raw=true "input")
 
 
+High-res output of famous portraits (64 circle/line units, 20 color units).  Trained models can output an image of any size:
+![Mona Lisa](assets/mona_lisa_single_circular_64d_20h_high_res.png "input")
 
+![Washington](assets/washington_single_linear_64d_20h_high_res.png "input")
 #### Usage
 
 `image_learn.py` saves the model after each set of epochs, to a .tf file, which includes the input image and all the training parameters.

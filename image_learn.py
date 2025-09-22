@@ -349,8 +349,8 @@ class UIDisplay(object):
         # print FFMPEG command to make a movie from the images
         if self._frame_dir is not None:
             logging.info("To make a movie from the images, try:")
-            logging.info("  ffmpeg -y -framerate 10 -i %s_%s_%id_%ih_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
-                         (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str(), self._sim.n_hidden))
+            logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
+                         (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
 
     def _gen_image(self, shape=None):
         if shape is None:

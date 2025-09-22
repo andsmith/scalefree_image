@@ -100,7 +100,7 @@ class ScaleInvariantImage(object):
         input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
         r, g, b = cv2.split(self.image_train / 255.0)
         output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
-        logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f], %i samples total. <------------" %
+        logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f], %i samples total." %
                      (grid_shape, input[:, 0].min(), input[:, 0].max(), input[:, 1].min(), input[:, 1].max(), input.shape[0]))
         return input, output
 
@@ -163,10 +163,11 @@ class ScaleInvariantImage(object):
         shape = x.shape
         logging.info("Making display image with shape:  %s" % (shape,))
         inputs = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
-        logging.info("Rescaled inputs to span [%.3f, %.3f] and [%.3f, %.3f]." % (np.min(inputs[:, 0]),
+        logging.info("Rescaled inputs to span [%.3f, %.3f] and [%.3f, %.3f], %i total samples." % (np.min(inputs[:, 0]),
                                                                                  np.max(inputs[:, 0]),
                                                                                  np.min(inputs[:, 1]),
-                                                                                 np.max(inputs[:, 1])))
+                                                                                 np.max(inputs[:, 1]),
+                                                                                 inputs.shape[0]))
         rgb = self._model.predict(inputs)
         logging.info("Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
         img = cv2.merge((rgb[:, 0].reshape(shape[:2]), rgb[:, 1].reshape(shape[:2]), rgb[:, 2].reshape(shape[:2])))
@@ -451,7 +452,6 @@ class UIDisplay(object):
                 Plot the individual minibatch losses, and their mean per cycle on top.   
                 """
                 all_losses = np.hstack(self._loss_history)
-                # print(self._cycle,"<-----------------------")
                 cycle_x = np.linspace(0, self._cycle+1, all_losses.size)
                 total_xy = np.array((cycle_x, all_losses)).T
                 if artists['loss'] is None:

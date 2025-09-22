@@ -126,7 +126,9 @@ test_data = {'frame_rate': 20,
                  {'input_pattern': r'movie\\barn_linear_50d_20h_cycle-????????.png',
                   'caption': ['50 line units', '20 color units']},
                  {'input_pattern': r'movie\\barn_circular_50d_20h_cycle-????????.png',
-                     'caption': ['50 circle units', '20 color units']}
+                     'caption': ['50 circle units', '20 color units']},
+                 {'input_pattern': r'movie\\barn_output_15c-15l_20h_cycle-????????.png',
+                     'caption': ['15 line units + 15 circle units', '20 color units']}
              ]
              }
 

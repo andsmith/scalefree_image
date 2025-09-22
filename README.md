@@ -125,10 +125,11 @@ Running to generate an image from a trained model:
 ## Videos
 run `> python make_movie.py --help` to see options for making movies from saved frames.
 
-Click the image for a link to a video.  Who is this?
+Click the image for a link to a video showing the process with different numbers of linear dividers.  How many does it take for you to recognize the image?
+
 [![Watch lines here](assets/washington_linear_32d_10h_cycle-00000103.png)](https://youtube.com/shorts/in2lN46T8gw?feature=share)
 
-Circles
+Click this image to see the same for 
 
 
 

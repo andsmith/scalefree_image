@@ -1,3 +1,4 @@
+import sys
 import time
 import tensorflow as tf
 import tempfile
@@ -266,17 +267,15 @@ class UIDisplay(object):
         self._output_shape = None  # for saving:  set during training, train_image.shape * display_multiplier, high res-generated image
         self._frame = None
 
-        self._interactive = not just_image
-        if just_image:
-            self._write_image()
-            self._shutdown = True
-            return
-        
+        self._just_image =  just_image
+
     def get_filename(self, which='model'):
         if which == 'model':
             return "%s_model_%s_%id_%ih.pkl" % (self._file_prefix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden)
-        elif which == 'image':
+        elif which == 'frame':
             return "%s_%s_%id_%ih_cycle-%.8i.png" % (self._file_prefix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden, self._sim.cycle)
+        elif which=='single-image':
+            return "%s_single_%s_%id_%ih.png" % (self._file_prefix, self._sim.div_type, self._sim.n_dividers, self._sim.n_hidden)
         else:
             raise Exception("Unknown filename type:  %s" % (which,))
 
@@ -307,7 +306,8 @@ class UIDisplay(object):
             if self._shutdown:
                 break
 
-            self._output_image = self._write_image() # Create & save image
+            self._output_image = self._gen_image()
+            self._write_frame(self._output_image) # Create & save image
 
             filename = self.get_filename('model')
             out_path = filename # Just write to cwd instead of os.path.join(img_dir, filename)
@@ -328,11 +328,20 @@ class UIDisplay(object):
             logging.info("  ffmpeg -y -framerate 10 -i %s_%s_%id_%ih_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
                          (os.path.join(self._frame_dir, self._file_prefix), self.div_type, self.n_dividers, self.n_hidden))
 
-    def _write_image(self):
-        self._out_shape = (np.array(self._sim.image_train.shape[:2]) * self._display_multiplier).astype(int)
-        img = self._sim.gen_image(output_shape=self._out_shape, border=self._border)
+    def _gen_image(self, shape=None):
+        if shape is None:
+            shape = (np.array(self._sim.image_train.shape[:2]) * self._display_multiplier).astype(int)
+        img = self._sim.gen_image(output_shape=shape, border=self._border)
+        return img
+    
+    def _write_image(self, img):
+        out_filename = self.get_filename('single-image')
+        cv2.imwrite(out_filename, np.uint8(255 * img[:, :, ::-1]))
+        logging.info("Wrote:  %s" % (out_filename,))
+
+    def _write_frame(self, img):
         if self._frame_dir is not None:
-            out_filename = self.get_filename('image')
+            out_filename = self.get_filename('frame')
             out_path = os.path.join(self._frame_dir, out_filename)
             if os.path.exists(out_path):
                 logging.warning("Output image %s already exists, overwriting!!!!" % (out_path,))
@@ -360,8 +369,13 @@ class UIDisplay(object):
            * middle is the current output image
            * right is the loss history
         """
-        
-        self._start()
+        if self._just_image:
+            img_shape = (np.array(self._sim.image_raw.shape[:2]) * self._display_multiplier).astype(int)
+            img = self._gen_image(shape=img_shape)
+            self._write_image(img)
+            return
+                
+        self._start()  # start thread, training / eval cycle
 
         while self._sim.image_train is None:
             time.sleep(0.05)

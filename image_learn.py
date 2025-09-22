@@ -316,6 +316,11 @@ class UIDisplay(object):
 
         self._cycle = self._sim.cycle  # in case resuming from a saved state
 
+        # write frame before any training (may overwrite last frame if continuing a run).
+        self._output_image = self._gen_image()
+        self._write_frame(self._output_image) # Create & save image
+
+
         while not self._shutdown:
             if self._shutdown:
                 break

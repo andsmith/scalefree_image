@@ -208,7 +208,11 @@ class ScaleInvariantImage(object):
         print("Loaded model state from:  %s, n_weight_layers: %i" % (model_filepath, len(state['weights'])))
 
         return state
-
+    
+    def get_train_img_shape(self, downscale):
+        print("Current downscale level:  %.3f" % (downscale,))
+        image_train = downscale_image(self.image_raw, downscale)
+        return image_train.shape
 
 class BatchLossCallback(Callback):
     """
@@ -223,6 +227,8 @@ class BatchLossCallback(Callback):
         self.batch_losses.append(logs['loss'])
         # Optional: print the loss for each batch
         # print(f"Batch {batch+1} loss: {logs['loss']:.4f}")
+
+        
 
 
 class UIDisplay(object):
@@ -360,7 +366,8 @@ class UIDisplay(object):
 
     def _gen_image(self, shape=None):
         if shape is None:
-            shape = (np.array(self._sim.image_train.shape[:2]) * self._display_multiplier).astype(int)
+            train_shape = self._sim.get_train_img_shape(self._downscale)
+            shape = (np.array(train_shape[:2]) * self._display_multiplier).astype(int)
         img = self._sim.gen_image(output_shape=shape, border=self._border)
         return img
     

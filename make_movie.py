@@ -20,8 +20,6 @@ Each episode is a dictionary with keys:
                     (NOTE, must be the correct number of ?'s for the digits.)
                     The ? will be replaced with digits starting from 0, frames sorted by this number.
     "caption": a text caption to display below the image
-    "resolution": (width, height)  # optional, if present and not (0, 0), resize frames to this resolution
-         otherwise use the frame's native resolution (and issue warnings if they differ)
 """
 import time
 import os
@@ -37,15 +35,16 @@ import cv2
 import glob
 import re
 import numpy as np
+COLORS = {'text': (51, 4, 0),
+          'bkg': (227, 238, 246)}  # BGR
 
 test_data_linear = {'frame_rate': 30,
-                    'resolution': (0, 0),  # use first image size
                     'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
                     'title_pause_sec': 5.0,
                     'episode_initial_pause_sec': 1.0,
                     'episode_final_pause_sec': 3.0,
-                    'txt_color': (255, 255, 255),
-                    'bkg_color': (0, 0, 0),
+                    'txt_color': COLORS['text'],
+                    'bkg_color': COLORS['bkg'],
                     'title_pad_px': 30,
                     'caption_pad_xy': (10, 5),
                     'title': {'main': ('Cut the plane with N lines,',
@@ -73,13 +72,12 @@ test_data_linear = {'frame_rate': 30,
 
 
 test_data_circular = {'frame_rate': 30,
-                      'resolution': (0, 0),  # use first image size
                       'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
                       'title_pause_sec': 5.0,
                       'episode_initial_pause_sec': 1.0,
                       'episode_final_pause_sec': 3.0,
-                      'txt_color': (255, 255, 255),
-                      'bkg_color': (0, 0, 0),
+                      'txt_color': COLORS['text'],
+                      'bkg_color': COLORS['bkg'],
                       'title_pad_px': 30,
                       'caption_pad_xy': (10, 5),
                       'title': {'main': ('Cut the plane with N circles.',
@@ -103,40 +101,68 @@ test_data_circular = {'frame_rate': 30,
                            'caption': ['512 circle units', '64 color units']}
                       ]
                       }
-test_data = {'frame_rate': 20,
-             'resolution': (0, 0),  # use first image size
-             'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
-             'title_pause_sec': 2.0,
-             'episode_initial_pause_sec': 2.0,
-             'episode_final_pause_sec': 4.0,
-             'txt_color': (255, 255, 255),
-             'bkg_color': (0, 0, 0),
-             'title_pad_px': 30,
-             'caption_pad_xy': (10, 5),
-             
-             'title': {'main': ('Optimal image approximation',
-                                'with 50 lines, 50 circles.'),
-                       'sub1': ('learn rates: 0.1, 0.01',
-                                '            500 epochs each,',
-                                '            1 frame = 25 epochs.'),
-                       'sub2': ('By:  Andrew T. Smith, 2025',
-                                'github: andsmith/scalefree_image',),
-                       'spacing_frac': 0.2,
-                       'max_font_scales': (None, 1.2, None)
-                       },
-             'train_img': {'file': 'barn_train_15c-15l_20h_downscale=3.0.png',
-                           'caption': ['training image (198 x 109)'],
-                           'duration_sec': 5.0},
-             'episodes': [
-                 {'input_pattern': r'movie\\barn_linear_50d_20h_cycle-????????.png',
-                  'caption': ['50 line units', '20 color units']},
-                 {'input_pattern': r'movie\\barn_circular_50d_20h_cycle-????????.png',
-                     'caption': ['50 circle units', '20 color units']},
-                 {'input_pattern': r'movie\\barn_output_15c-15l_20h_cycle-????????.png',
-                     'caption': ['15 line units + 15 circle units, 20 color units',
-                                 'epochs@LR: 250@1.0, 500@0.1, 500@0.01, 500@0.001']},
-             ]
-             }
+
+
+test_data_barn = {'frame_rate': 30,
+                  'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
+                  'title_pause_sec': 5.0,
+                  'episode_initial_pause_sec': 2.0,
+                  'episode_final_pause_sec': 4.0,
+                  'txt_color': COLORS['text'],
+                  'bkg_color': COLORS['bkg'],
+                  'title_pad_px': 30,
+                  'caption_pad_xy': (10, 5),
+                  'title': {'main': ('Optimal image approximation using',
+                                     '50 lines, 50 circles, 25 of each.'),
+                            'sub1': ('learn rates: 0.1, 0.01',
+                                     '            500 epochs each,',
+                                     '            1 frame = 25 epochs.'),
+                            'sub2': ('By:  Andrew T. Smith, 2025',
+                                     'github: andsmith/scalefree_image',),
+                            'spacing_frac': 0.2,
+                            'max_font_scales': (None, 1.2, None)
+                            },
+                  'train_img': {'file': 'barn_train_25c-25l_20h_downscale=6.0.png',
+                                'caption': ['training image (99 x 54)'],
+                                'duration_sec': 5.0},
+                  'episodes': [
+                      {'input_pattern': r'movie\\barn_linear_50d_20h_cycle-????????.png',
+                       'caption': ['50 line units', '20 color units']},
+                      {'input_pattern': r'movie\\barn_circular_50d_20h_cycle-????????.png',
+                       'caption': ['50 circle units', '20 color units']},
+                      {'input_pattern': r'movie_mix\\barn_output_25c-25l_20h_cycle-????????.png',
+                       'caption': ['25 line units + 25 circle units, 20 color units',
+                                        'epochs@LR: 250@1.0, 500@0.1, 500@0.01']},
+                  ]}
+
+test_data_barn_meta = {'frame_rate': 10,
+                       'caption_height_px': 80,  # shrink/grow if if you need more/fewer lines of text
+                       'title_pause_sec': 5.0,
+                       'episode_initial_pause_sec': 2.0,
+                       'episode_final_pause_sec': 4.0,
+                       'txt_color': COLORS['text'],
+                       'bkg_color': COLORS['bkg'],
+                       'title_pad_px': 30,
+                       'caption_pad_xy': (10, 5),
+                       'title': {'main': ('Optimal image approximation using',
+                                          ' 25 circle units + 25 line units,',
+                                          ' 20 color units.'),
+                                 'sub1': tuple(),
+                                 'sub2': ('By:  Andrew T. Smith, 2025',
+                                          'github: andsmith/scalefree_image',),
+                                 'spacing_frac': 0.2,
+                                 'max_font_scales': (None, 1.2, None)
+                                 },
+                       'train_img': {'file': 'barn_train_20c-20l_20h_downscale=3.0.png',
+                                     'caption': ['training image (198 x 109)'],
+                                     'duration_sec': 5.0},
+                       'episodes': [
+                           {'json_meta': r'barn_metadata_25c-25l_20h.json',
+                            'caption': [{'txt': 'cycle: %d', 'meta_keys': ['cycle']},
+                                        {'txt': 'learning rate: %.5f', 'meta_keys': ['learning_rate']},
+                                        {'txt': 'loss: %.7f', 'meta_keys': ['loss']}]}
+                       ]
+                       }
 
 
 class MovieMaker(object):
@@ -144,10 +170,10 @@ class MovieMaker(object):
         self.movie_data = movie_data
         self.output_file = output_file
         self.preview = preview
-
+        self.train_img = cv2.imread(self.movie_data['train_img']['file'])[
+            :, :, ::-1] if 'train_img' in self.movie_data else None
         self.frame_rate = self.movie_data['frame_rate']
         self.caption_height_px = self.movie_data['caption_height_px']
-        self.resolution = tuple(self.movie_data['resolution'])
         self.episode_data = self.movie_data['episodes']
         self.title_txt = self.movie_data['title']
         self.title_pad_px = self.movie_data['title_pad_px']
@@ -160,6 +186,17 @@ class MovieMaker(object):
         self._title_spacing_frac = self.movie_data['title']['spacing_frac']
         self._max_title_font_scales = self.movie_data['title'].get('max_font_scales', (None, None, None))
         # self.episodes = self._load()
+
+    def make_train_frame(self, size_wh):
+        if self.train_img is None:
+            raise ValueError("No training image provided in movie data.")
+        train_img = self.train_img[:, :, ::-1]
+        if (train_img.shape[1], train_img.shape[0]) != size_wh:
+            logging.warning(f"Resizing training image from ({train_img.shape[1]}, {train_img.shape[0]}) to {size_wh}")
+            train_img = cv2.resize(train_img, size_wh, interpolation=cv2.INTER_AREA)
+        frame = captioned_frame(train_img, self.movie_data['train_img']['caption'], self.caption_height_px,
+                                self.caption_pad_xy, txt_color=self.txt_color, bkg_color=self.bkg_color)
+        return frame
 
     def make_title_frame(self, size_wh, spacing_frac=0.0, max_font_scales=(None, None, None)):
         """
@@ -174,7 +211,7 @@ class MovieMaker(object):
         |    sub2 line 1    |
         |    sub2 line 2    |
         +-------------------+
-        :param size_wh: (width, height) of the image area 
+        :param size_wh: (width, height) of the image area
         :param pad_px: padding in pixels
         :param spacing_frac: fraction of the image height to use for spacing (between text line groups)
         """
@@ -210,15 +247,18 @@ class MovieMaker(object):
         add_text(frame, self.title_txt['main'], main_bbox, font_face=cv2.FONT_HERSHEY_COMPLEX,
                  justify='center', color=self.txt_color, line_spacing=2.5, **kwargs)
 
-        kwargs = {} if max_font_scales[1] is None else {'max_font_scale': max_font_scales[1]}
-        add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=2.5,
-                 font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='left', color=self.txt_color, **kwargs)
-        kwargs = {} if max_font_scales[2] is None else {'max_font_scale': max_font_scales[2]}
-        add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
-                 justify='left', line_spacing=2.5, color=self.txt_color, **kwargs)
+        if len(self.title_txt['sub1']) > 0:
+            kwargs = {} if max_font_scales[1] is None else {'max_font_scale': max_font_scales[1]}
+            add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=2.5,
+                    font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='left', color=self.txt_color, **kwargs)
+        if len(self.title_txt['sub2']) > 0:
+            kwargs = {} if max_font_scales[2] is None else {'max_font_scale': max_font_scales[2]}
+            add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
+                    justify='left', line_spacing=2.5, color=self.txt_color, **kwargs)
         return frame
 
     def run(self):
+        import ipdb; ipdb.set_trace()
         frames = self._make_frame_sequence()
         if self.preview:
             self._preview(frames)
@@ -231,7 +271,7 @@ class MovieMaker(object):
             self._write_movie(frames)
 
     def _preview(self, frames):
-        t0=time.perf_counter()
+        t0 = time.perf_counter()
         last_time = t0 - 10.0
         n_frames = 0
         max_delay = 1.0 / self.frame_rate
@@ -241,7 +281,7 @@ class MovieMaker(object):
             now = time.perf_counter()
             delay = now - last_time
             sleep_time = max_delay - delay
-            
+
             sleep_times.append(sleep_time)
 
             if sleep_time > 0:
@@ -264,48 +304,88 @@ class MovieMaker(object):
         cv2.destroyAllWindows()
 
     def _load_episode_frames(self, episode):
-        files = self._get_files(episode['input_pattern'])
-        if not files:
-            logging.error(f"No files found for episode with pattern:  {episode['input_pattern']}")
-            return []
         frames = []
-        for f in files:
+        if 'input_pattern' in episode:
+            files = glob.glob(episode['input_pattern'])
+            if not files:
+                logging.error(f"No files found for episode with pattern:  {episode['input_pattern']}")
+                return []
+            n_digits = episode['input_pattern'].count('?')
+            files = self._sort_frame_files(files, n_digits)
+            meta = None
+            logging.info("Loaded %d filenames for episode with pattern:  %s" % (len(files), episode['input_pattern']))
+        elif 'json_meta' in episode:
+            with open(episode['json_meta'], 'r') as f:
+                meta = json.load(f)
+            meta = self._sort_metadata(meta)
+            files = [m['filename'] for m in meta if 'filename' in m]
+            logging.info("Metadata file:  %s, loaded %d frame entries." % (episode['json_meta'], len(meta)))
+            if not files:
+                logging.error(f"No filenames found in metadata file:  {episode['json_meta']}")
+                return []
+        else:
+            raise ValueError("Episode must have either 'input_pattern' or 'json_meta' key.")
+
+        for f_i, f in enumerate(files):
             img = cv2.imread(f)
             if img is None:
-                logging.warning(f"Could not read image file:  {f}")
-                continue
-            if self.resolution != (0, 0):
-                if img.shape[1] != self.resolution[0] or img.shape[0] != self.resolution[1]:
-                    img = cv2.resize(img, self.resolution, interpolation=cv2.INTER_AREA)
-            else:
-                if frames and (img.shape[1] != frames[0].shape[1] or img.shape[0] != frames[0].shape[0]):
-                    logging.warning(
-                        f"Image {f} has different size ({img.shape[1]}, {img.shape[0]}) than previous images ({frames[0].shape[1]}, {frames[0].shape[0]}).")
+                raise ValueError(f"Failed to read image file for frame {f_i}:  {f}")
             frames.append(img)
+
         if not frames:
             raise ValueError(f"No valid image files found for episode with pattern:  {episode['input_pattern']}")
-        logging.info("Loaded %d frames for episode with pattern:  %s" % (len(frames), episode['input_pattern']))
-        return frames
+        logging.info(f"Loaded {len(frames)} frames for episode.")
+        return frames, meta
+    def _make_frame_caption(self, meta, base_caption):
+        """
+        :param meta: metadata dictionary to take values for the caption from.
+        :param base_captions: list of dictionaries, one per line of caption, each with keys:
+               'txt': a format string with %d, %f, etc. for values from 'meta'
+               'meta_keys': list of keys to get values from the 'meta' dict.
+        """
+        lines = []
+        for cap in base_caption:
+            fmt = cap['txt']
+            keys = cap['meta_keys']
+            values = [meta[k] if k in meta else 'N/A' for k in keys]
+            try:
+                line = fmt % tuple(values)
+            except (TypeError, KeyError) as e:
+                logging.error(f"Error formatting caption line: {e}")
+                line = fmt % ('N/A',) * len(keys)
+            lines.append(line)
+        return lines
 
     def _make_episode_seq(self, episode):
-        frames = self._load_episode_frames(episode)
-        frame_captions = episode['caption']
-        frames = [captioned_frame(f, frame_captions, self.caption_height_px, self.caption_pad_xy,
-                                  txt_color=self.txt_color, bkg_color=self.bkg_color) for f in frames]
+        frames, meta = self._load_episode_frames(episode)
+        if meta is None:
+            frame_captions = [episode['caption']] * len(frames)
+        else:
+            # Need to make custom captions from the metadata for each frame
+            frame_captions = [self._make_frame_caption(m, episode['caption']) for m in meta]
+
+        frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy,
+                                    txt_color=self.txt_color, bkg_color=self.bkg_color) for f,c in zip(frames, frame_captions)]
+
         intro_frame = frames[0]
         outro_frame = frames[-1]
-        frames = self._mk_seq(intro_frame, self.initial_pause_sec) + frames + \
-            self._mk_seq(outro_frame, self.final_pause_sec)
+        frames = self._mk_seq(intro_frame, self.initial_pause_sec) + frames + self._mk_seq(outro_frame, self.final_pause_sec)
 
         return frames
 
     def _make_frame_sequence(self):
         episode_sequences = [self._make_episode_seq(ep) for ep in self.episode_data]
         frame_size_wh = episode_sequences[0][0].shape[:2][::-1]
-        title_frame = self.make_title_frame(frame_size_wh,
+        img_size = (frame_size_wh[0], frame_size_wh[1]-self.caption_height_px)
+        logging.info("Got image/frame size from first episode's first frame:  %s / %s" % (img_size, frame_size_wh))
+        title_frame = self.make_title_frame(frame_size_wh,  # include caption area
                                             spacing_frac=self._title_spacing_frac,
                                             max_font_scales=self._max_title_font_scales)
-        frames = self._mk_seq(title_frame, self.title_dur_sec)
+
+        frames = self._mk_seq(title_frame, self.title_dur_sec,)
+        if self.train_img is not None:
+            train_frame = self.make_train_frame(img_size)  # don't include caption in size, this adds one
+            frames += self._mk_seq(train_frame, self.movie_data['train_img']['duration_sec'])
         for seq in episode_sequences:
             frames += seq
         return frames
@@ -398,17 +478,11 @@ class MovieMaker(object):
             if 'proc' in locals():
                 proc.terminate()
 
-    def _get_files(self, glob_pattern):
-        """
-        Get a sorted list of files matching the glob pattern.
-        The pattern should include '?' characters for the digits, e.g. 'frame_?????.png'.
-        """
-        files = glob.glob(glob_pattern)
+    def _sort_frame_files(self, files, n_digits):
         if not files:
             return []
-        # Extract the number from the filename using regex
-        digit_count = glob_pattern.count('?')
-        regex_pattern = re.escape(glob_pattern).replace(r'\?' * digit_count, r'(\d{' + str(digit_count) + r'})')
+        # Extract the number from the filename, it will be where n_digits '?' are in the pattern
+        regex_pattern = r'(\d{' + str(n_digits) + r'})'
         regex = re.compile(regex_pattern)
 
         def extract_number(f):
@@ -420,6 +494,26 @@ class MovieMaker(object):
 
         files.sort(key=extract_number)
         return files
+
+    def _sort_metadata(self, meta):
+        """
+        assume filename is formatted ...000324.png,
+        i.e. ending with the frame number with leading zeros, then an extension.
+        Sort the metadata list by this number.
+        """
+        
+        n_digits = len( re.search(r'([0-9]+)\.[a-zA-Z0-9]', meta[0]['filename']).group(1) )
+        regex_pattern = r'(\d{' + str(n_digits) + r'})'
+        regex = re.compile(regex_pattern)
+
+        def extract_number(m):
+            match = regex.search(m['filename'])
+            if match:
+                return int(match.group(1))
+            else:
+                return float('inf')  # If no match, put it at the end
+        meta.sort(key=extract_number)
+        return meta
 
 
 def get_args():
@@ -442,7 +536,7 @@ if __name__ == "__main__":
     # load data
     if args.movie_json is None:
 
-        movie_data = deepcopy(test_data)
+        movie_data = deepcopy(test_data_barn_meta)
         logging.info("No movie json file provided, using built-in test data, has %i episodes." %
                      (len(movie_data['episodes']),))
     else:
@@ -465,8 +559,11 @@ if __name__ == "__main__":
         title_frame = movie_maker.make_title_frame((800, 600),
                                                    movie_data['title']['spacing_frac'],
                                                    max_font_scales=movie_data['title']['max_font_scales'])
-        cv2.imwrite('example_title.png', title_frame)
+        train_frame = movie_maker.make_train_frame((800, 600))
+        cv2.imwrite('example_title.png', title_frame[:, :, ::-1])
         logging.info("No output mp4 file provided, wrote title frame to: example_title.png")
+        cv2.imwrite('example_train.png', train_frame[:, :, ::-1])
+        logging.info("Wrote training image frame to: example_train.png")
         sys.exit(0)
 
     if args.play:

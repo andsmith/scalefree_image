@@ -15,11 +15,9 @@
 @REM python .\image_learn.py -i .\input\mona_lisa.jpg -t circular -e 3 -d 512 -n 64 --learning_rate .1 -p 3 -x 2 --save_frames movies --cycles 200
 
 
-python .\image_learn.py -i .\input\barn.png -e 20 -c 20 -l 20 -n 20 --learning_rate 1 -p 6 -x 1 --save_frames movie2  --cycles 10 
-python .\image_learn.py -i .\input\barn.png -e 20 -c 20 -l 20 -n 20 --learning_rate .1 -p 6 -x 1 --save_frames movie2  --cycles 20 -m barn_model_20c-20l_20h.pkl
-python .\image_learn.py -i .\input\barn.png -e 20 -c 20 -l 20 -n 20 --learning_rate .01 -p 6 -x 1 --save_frames movie2  --cycles 40 -m barn_model_20c-20l_20h.pkl
-python .\image_learn.py -i .\input\barn.png -e 20 -c 20 -l 20 -n 20 --learning_rate .001 -p 6 -x 1 --save_frames movie2  --cycles 80 -m barn_model_20c-20l_20h.pkl
-
+python .\image_learn.py -i .\input\barn.png -e 50 -c 25 -l 25 -n 20 --learning_rate 1 -p 6 -x 8 --save_frames movie_mix  --cycles 50 --nogui
+python .\image_learn.py -i .\input\barn.png -e 50 -c 25 -l 25 -n 20 --learning_rate .1 -p 6 -x 8 --save_frames movie_mix --cycles 100 -m barn_model_25c-25l_20h.pkl --nogui
+python .\image_learn.py -i .\input\barn.png -e 50 -c 25 -l 25 -n 20 --learning_rate .01 -p 6 -x 8 --save_frames movie_mix --cycles 100 -m barn_model_25c-25l_20h.pkl --nogui
 
 @REM python .\image_learn.py -i .\input\barn.png -e 15 -c 15 -l 15 -n 20 --learning_rate .001 -p 3 -x 4 --save_frames movie  --cycles 300 -m barn_model_15c-15l_20h.pkl
 

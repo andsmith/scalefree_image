@@ -24,6 +24,7 @@ from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
 import matplotlib.pyplot as plt
+import json
 import matplotlib.gridspec as gridspec
 
 from keras.optimizers.schedules import ExponentialDecay
@@ -38,7 +39,7 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=16, learning_rate=.1, sharpness=1000.0, grad_sharpness=3.0):
+    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=16, sharpness=1000.0, grad_sharpness=3.0, learning_rate_initial=0.1, downscale=1.0, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
@@ -47,7 +48,6 @@ class ScaleInvariantImage(object):
         :param state_file: if not None, a file to load the model state from (overrides other args except learning rate, batch size)
         :param image: if not None, a HxWx3 or HxW numpy array containing the target image
         :param batch_size: training batch size
-        :param learning_rate: learning rate for the optimizer
         :param sharpness: sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear
 
         """
@@ -55,24 +55,25 @@ class ScaleInvariantImage(object):
         self.n_hidden = n_hidden
         self.n_div = n_div
         self.batch_size = batch_size
-        self.learning_rate = learning_rate
         self.grad_sharpness = grad_sharpness
         self.image_train = None
-        self._downscale_level = None
+        self._downscale = downscale
         self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
 
+        self._learning_rate = learning_rate_initial
+
         # Cache this
         self._last_downscale = None
-        self._input, self._output = None, None
-        
+        self._input, self._output = self._make_train(self._downscale)
+
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
             # (so they can be None in the args)
             state = ScaleInvariantImage._load_state(state_file)
             weights = state['weights']
             self.cycle, self.image_raw, self.n_hidden, self.n_div,  self.sharpness, self.grad_sharpness = \
-                  state['cycle'], state['image_raw'], state['n_hidden'], state['n_div'], state['sharpness'], state['grad_sharpness']
+                state['cycle'], state['image_raw'], state['n_hidden'], state['n_div'], state['sharpness'], state['grad_sharpness']
             # Checks
             if image_raw is not None and image_raw.shape != self.image_raw.shape:
                 logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
@@ -89,9 +90,9 @@ class ScaleInvariantImage(object):
             logging.info("Initialized new model.")
 
         self._model.compile(loss='mean_squared_error',
-                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self.learning_rate))
+                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate))  # default 0.001
 
-        logging.info("Model compiled with learning_rate:  %f" % (self.learning_rate,))
+        logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
     def _make_train(self, downscale, keep_aspect=True):
         if self._last_downscale is not None and self._last_downscale == downscale:
@@ -102,7 +103,7 @@ class ScaleInvariantImage(object):
         self.image_train = downscale_image(self.image_raw, self._downscale_level)
 
         in_x, in_y = make_input_grid(self.image_train.shape, keep_aspect=keep_aspect)
-            
+
         grid_shape = in_x.shape
         input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
         r, g, b = cv2.split(self.image_train / 255.0)
@@ -130,7 +131,8 @@ class ScaleInvariantImage(object):
         div_layers = []
         for div_type, n_div in self.n_div.items():
             if n_div > 0:
-                layer = DIV_TYPES[div_type](n_div, sharpness=self.sharpness, grad_sharpness=self.grad_sharpness, name="%s_div_layer" % (div_type,))(input)
+                layer = DIV_TYPES[div_type](n_div, sharpness=self.sharpness,
+                                            grad_sharpness=self.grad_sharpness, name="%s_div_layer" % (div_type,))(input)
                 div_layers.append(layer)
         if len(div_layers) == 0:
             raise Exception("Need at least one division unit (circular, linear, or sigmoid).")
@@ -140,14 +142,26 @@ class ScaleInvariantImage(object):
             concat_layer = div_layers[0]
 
         color_layer = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
-                       kernel_initializer='random_normal')(concat_layer)
+                            kernel_initializer='random_normal')(concat_layer)
         output = Dense(3, use_bias=True, activation=tf.nn.sigmoid)(color_layer)
         model = Model(inputs=input, outputs=output)
         return model
 
-    def train_more(self, epochs, downscale, verbose=True):
+    def get_loss(self):
+        loss = self._model.evaluate(self._input, self._output, batch_size=self.batch_size, verbose=0)
+        logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
+        return loss
 
-        input, output = self._make_train(downscale)
+    def _update_learning_rate(self, learning_rate):
+        self._learning_rate = learning_rate
+        self._model.optimizer.learning_rate.assign(self._learning_rate)
+        logging.info("Updated learning rate to:  %.6f" % (self._learning_rate,))
+
+    def train_more(self, epochs, learning_rate=None, verbose=True):
+        if learning_rate is not None and learning_rate != self._learning_rate:
+            self._update_learning_rate(learning_rate)
+
+        input, output = self._input, self._output
 
         # Save numpy training set:
         # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
@@ -163,7 +177,8 @@ class ScaleInvariantImage(object):
         batch_history = batch_losses.batch_losses
         logging.info("Batch losses for cycle %i: %s steps" % (self.cycle, len(batch_history)))
         self.cycle += 1
-        return batch_history
+        loss = self.get_loss()
+        return batch_history, loss
 
     def gen_image(self, output_shape, border=0.0, keep_aspect=True):
 
@@ -172,10 +187,10 @@ class ScaleInvariantImage(object):
         logging.info("Making display image with shape:  %s" % (shape,))
         inputs = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
         logging.info("Rescaled inputs to span [%.3f, %.3f] and [%.3f, %.3f], %i total samples." % (np.min(inputs[:, 0]),
-                                                                                 np.max(inputs[:, 0]),
-                                                                                 np.min(inputs[:, 1]),
-                                                                                 np.max(inputs[:, 1]),
-                                                                                 inputs.shape[0]))
+                                                                                                   np.max(inputs[:, 0]),
+                                                                                                   np.min(inputs[:, 1]),
+                                                                                                   np.max(inputs[:, 1]),
+                                                                                                   inputs.shape[0]))
         rgb = self._model.predict(inputs)
         logging.info("Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
         img = cv2.merge((rgb[:, 0].reshape(shape[:2]), rgb[:, 1].reshape(shape[:2]), rgb[:, 2].reshape(shape[:2])))
@@ -190,7 +205,7 @@ class ScaleInvariantImage(object):
         Save only the necessary args in a dict 
         """
         weights = self._model.get_weights()
-        print("Saving model weights with %i layers to:  %s" % (len(weights), model_filename))
+        logging.info("Saving model weights with %i layers to:  %s" % (len(weights), model_filename))
         data = {'weights': weights,
                 'image_raw': self.image_raw,
                 'cycle': self.cycle,
@@ -213,14 +228,11 @@ class ScaleInvariantImage(object):
             raise Exception("State file doesn't exist:  %s" % (model_filepath,))
         with open(model_filepath, 'rb') as infile:
             state = cp.load(infile)
-        print("Loaded model state from:  %s, n_weight_layers: %i, at cycle: %i" % (model_filepath, len(state['weights']), state['cycle']))
+        logging.info("Loaded model state from:  %s, n_weight_layers: %i, at cycle: %i" %
+              (model_filepath, len(state['weights']), state['cycle']))
 
         return state
-    
-    def get_train_img_shape(self, downscale):
-        print("Current downscale level:  %.3f" % (downscale,))
-        image_train = downscale_image(self.image_raw, downscale)
-        return image_train.shape
+
 
 class BatchLossCallback(Callback):
     """
@@ -236,8 +248,6 @@ class BatchLossCallback(Callback):
         # Optional: print the loss for each batch
         # print(f"Batch {batch+1} loss: {logs['loss']:.4f}")
 
-        
-
 
 class UIDisplay(object):
 
@@ -252,23 +262,37 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, max_cycles=0,
-                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.001, **kwargs):
+    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, run_cycles=0,
+                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_div = n_div
         self.n_hidden = n_hidden
-        self.max_cycles = max_cycles
+        self._run_cycles = run_cycles
         self._shutdown = False
         self._frame_dir = frame_dir
         self._cycle = 0  # epochs_per_cycle epochs of training and an output update increments this
         self._annotate = False
-        self._learning_rate = learning_rate
+        self._learn_rate = learning_rate  # updates as we anneal
         self._downscale = downscale  # constant downscale factor for training image
         self._learning_rate_init = learning_rate
+        self._learning_rate_final = learning_rate_final
         self._output_image = None
         self._loss_history = []
+        self._nogui = nogui
+        self._metadata = []
+        if learning_rate_final is not None:
+            if learning_rate_final < 0:
+                raise Exception("Final learning rate must be non-negative for annealing.")
+            if self._run_cycles <= 0:
+                raise Exception("Must specify run_cycles > 0 if annealing with learning_rate_final.")
+
+            self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / self._run_cycles)
+            logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles." %
+                         (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles))
+        else:
+            self._learning_rate_decay = None
 
         if not os.path.exists(image_file):
             raise Exception("Image file doesn't exist:  %s" % (image_file,))
@@ -276,19 +300,29 @@ class UIDisplay(object):
         self._image_raw = cv2.imread(image_file)[:, :, ::-1]
 
         logging.info("Loaded image %s with shape %s." %
-                        (image_file, self._image_raw.shape))
+                     (image_file, self._image_raw.shape))
         # model/image file prefix is the image bare name without extension
         self._file_prefix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
 
-        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate=self._learning_rate,
-                                        state_file=state_file, image_raw=self._image_raw, **kwargs)
+        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate_initial=self._learn_rate,
+                                        state_file=state_file, image_raw=self._image_raw, downscale=self._downscale, **kwargs)
+
+        # Check for metadata file
+        if state_file is not None:
+            meta_filename = self.get_filename('metadata')
+            if os.path.exists(meta_filename):
+                with open(meta_filename, 'r') as f:
+                    self._metadata = json.load(f)
+                logging.info("Loaded metadata from:  %s" % (meta_filename,))
+            else:
+                logging.info("No metadata file found:  %s" % (meta_filename,))
 
         logging.info("Using output file prefix:  %s" % (self._file_prefix,))
 
         self._output_shape = None  # for saving:  set during training, train_image.shape * display_multiplier, high res-generated image
         self._frame = None
 
-        self._just_image =  just_image
+        self._just_image = just_image
 
     def _get_arch_str(self):
         """
@@ -310,27 +344,30 @@ class UIDisplay(object):
             return "%s_model_%s.pkl" % (self._file_prefix, self._get_arch_str())
         elif which == 'frame':
             return "%s_output_%s_cycle-%.8i.png" % (self._file_prefix, self._get_arch_str(), self._sim.cycle)
-        elif which=='single-image':
+        elif which == 'single-image':
             return "%s_single_%s.png" % (self._file_prefix, self._get_arch_str())
-        elif which =='train-image':
+        elif which == 'train-image':
             return "%s_train_%s_downscale=%.1f.png" % (self._file_prefix, self._get_arch_str(), self._downscale)
+        elif which == 'metadata':
+            return "%s_metadata_%s.json" % (self._file_prefix, self._get_arch_str())
         else:
             raise Exception("Unknown filename type:  %s" % (which,))
 
     def _save_training_image(self):
         filename = self.get_filename('train-image')
-        #file_path = os.path.join(self._frame_dir, filename) if self._frame_dir is not None else filename
+
+        # file_path = os.path.join(self._frame_dir, filename) if self._frame_dir is not None else filename
         file_path = filename
-        train_img = (self._sim.image_train * 255.0).astype(np.uint8)
+        train_img = self._sim.image_train
         cv2.imwrite(file_path, train_img[:, :, ::-1])
         logging.info("Wrote training image:  %s" % (file_path,))
 
     def _train_thread(self):
-        # TF 2.x doesn't use sessions or graphs in eager 
-        
+        # TF 2.x doesn't use sessions or graphs in eager
+
         # Print full model architecture
         self._sim._model.summary()
-        
+
         logging.info("Starting training:")
         logging.info("\tBatch size: %i" % (self._sim.batch_size,))
         logging.info("\tDiv types:  %s" % (self._get_arch_str(),))
@@ -338,25 +375,36 @@ class UIDisplay(object):
         logging.info("\tSharpness: %f" % (self._sim.sharpness,))
         logging.info("\tGradient sharpness: %f" % (self._sim.grad_sharpness,))
 
-        self._cycle = self._sim.cycle  # in case resuming from a saved state
+        self._cycle = self._sim.cycle  # in case resuming from a saved statese\\
+        run_cycle = 0  # number of cycles since starting this run (not counting previous runs if resuming from a saved state)
+
+        if self._run_cycles > 0:
+            logging.info("Will run for %i cycles of %i epochs each (total %i epochs), starting from cycle %i." %
+                         (self._run_cycles, self._epochs_per_cycle, self._run_cycles * self._epochs_per_cycle, self._cycle))
 
         # write frame before any training (may overwrite last frame if continuing a run).
         self._output_image = self._gen_image()
-        self._write_frame(self._output_image) # Create & save image
+        logging.info("Generated output image of shape:  %s" % (self._output_image.shape,))       
+        self._save_training_image()
+        # if we're continuing, don't store the new output image
 
+        if self._cycle == 0:
+            loss = self._sim.get_loss()
+            frame_name = self._write_frame(self._output_image)  # Create & save image
+            init_meta = {'cycle': self._sim.cycle,
+                         'learning_rate': self._learn_rate,
+                         'loss': loss,
+                         'filename': frame_name}
+            self._metadata.append(init_meta)
+            self._write_metadata()
 
-        while not self._shutdown:
+        while not self._shutdown and run_cycle < self._run_cycles:
             if self._shutdown:
                 break
+            logging.info("Training batch_size: %i, cycle: %i, learning_rate: %.6f" %
+                         (self._sim.batch_size, self._sim.cycle, self._learn_rate))
 
-            logging.info("Training batch_size: %i, cycle: %i, downscale_level: %.2f" %
-                         (self._sim.batch_size, self._sim.cycle, self._downscale))
-
-            new_losses = self._sim.train_more(self._epochs_per_cycle, downscale=self._downscale)
-
-
-            self._save_training_image()
- 
+            new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate)
             self._loss_history.append(new_losses)
 
             # self._save_state()
@@ -364,21 +412,26 @@ class UIDisplay(object):
                 break
 
             self._output_image = self._gen_image()
-            self._write_frame(self._output_image) # Create & save image
-
+            frame_name = self._write_frame(self._output_image)  # Create & save image
+            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'loss': loss, 'filename': frame_name})
+            self._write_metadata()
             filename = self.get_filename('model')
-            out_path = filename # Just write to cwd instead of os.path.join(img_dir, filename)
+            out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
             self._sim.save_state(out_path)  # TODO:  Move after each cycle
             logging.info("Saved model state to:  %s" % (out_path,))
 
             self._cycle += 1
+            run_cycle += 1
 
-            if self.max_cycles > 0 and self._cycle >= self.max_cycles:
-                logging.info("Reached max cycles (%i), stopping." % (self.max_cycles,))
+            if run_cycle >= self._run_cycles and self._run_cycles > 0:
+                logging.info("Reached max cycles (%i), stopping." % (self._run_cycles,))
                 self._shutdown = True
                 break
 
- 
+            if self._learning_rate_decay is not None:
+                self._learn_rate = self._learning_rate_decay * self._learn_rate
+                logging.info("Decayed learning rate to:  %.6f" % (self._learn_rate,))
+
         # print FFMPEG command to make a movie from the images
         if self._frame_dir is not None:
             logging.info("To make a movie from the images, try:")
@@ -387,17 +440,18 @@ class UIDisplay(object):
 
     def _gen_image(self, shape=None):
         if shape is None:
-            train_shape = self._sim.get_train_img_shape(self._downscale)
+            train_shape = self._sim.image_train.shape
             shape = (np.array(train_shape[:2]) * self._display_multiplier).astype(int)
         img = self._sim.gen_image(output_shape=shape, border=self._border)
         return img
-    
+
     def _write_image(self, img):
         out_filename = self.get_filename('single-image')
         cv2.imwrite(out_filename, np.uint8(255 * img[:, :, ::-1]))
         logging.info("Wrote:  %s" % (out_filename,))
 
     def _write_frame(self, img):
+        out_path = None
         if self._frame_dir is not None:
             if not os.path.exists(self._frame_dir):
                 os.makedirs(self._frame_dir)
@@ -408,10 +462,22 @@ class UIDisplay(object):
                 logging.warning("Output image %s already exists, overwriting!!!!" % (out_path,))
             cv2.imwrite(out_path, np.uint8(255 * img[:, :, ::-1]))
             logging.info("Wrote:  %s" % (out_path,))
-        return img
+        return out_path
+    
+    def _write_metadata(self):
+        # only if saving frames
+        if self._frame_dir is not None:
+            # write metadata to same file, just overwrite:
+            meta_filename = self.get_filename('metadata')
+            meta_path = '.'
+            meta_file_path = os.path.join(meta_path, meta_filename)
+
+            with open(meta_file_path, 'w') as f:
+                json.dump(self._metadata, f)
+            logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
 
     def _start(self):
-        #self._train_thread()
+        # self._train_thread()
         self._worker = Thread(target=self._train_thread)
         self._worker.start()
         logging.info("Started worker thread.")
@@ -435,8 +501,12 @@ class UIDisplay(object):
             img = self._gen_image(shape=img_shape)
             self._write_image(img)
             return
-                
-        self._start()  # start thread, training / eval cycle
+
+        self._start()
+        if self._nogui:
+            logging.info("No GUI mode, waiting for training to finish...")
+            self._worker.join()
+            return
 
         while self._sim.image_train is None:
             time.sleep(0.05)
@@ -449,7 +519,7 @@ class UIDisplay(object):
             out_ax = fig.add_subplot(grid[0, 1])
             loss_ax = fig.add_subplot(grid[0, 2])
         else:
-            grid = gridspec.GridSpec(2, 2, height_ratios=[2,1], width_ratios=[1,1])
+            grid = gridspec.GridSpec(2, 2, height_ratios=[2, 1], width_ratios=[1, 1])
             train_ax = fig.add_subplot(grid[0, 0])
             out_ax = fig.add_subplot(grid[0, 1])
             loss_ax = fig.add_subplot(grid[1, :])
@@ -511,6 +581,7 @@ class UIDisplay(object):
             if self._shutdown:
                 break
 
+
 def get_args():
     logging.basicConfig(level=logging.INFO)
 
@@ -521,39 +592,46 @@ def get_args():
     parser.add_argument("-l", "--lines", help="Number of linear division units.", type=int, default=0)
     parser.add_argument("-s", "--sigmoids", help="Number of sigmoid division units.", type=int, default=0)
 
-
     parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
     parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
     parser.add_argument("-j", "--just_image", help="Just do an image, no training.", action='store_true', default=False)
     parser.add_argument("-e", "--epochs_per_cycle", help="Number of epochs between frames.", type=int, default=1)
-    parser.add_argument('-k', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
-    parser.add_argument("-x", "--disp_mult", help="Display image dimension multiplier (X training image size).", type=float, default=1.0)
-    parser.add_argument("-b", "--border", help="Extrapolate outward from the original shape by this factor.",type=float, default=0.0)
-    parser.add_argument("-p", "--downscale", help="downscale image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
+    parser.add_argument(
+        '-k', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
+    parser.add_argument("-x", "--disp_mult",
+                        help="Display image dimension multiplier (X training image size).", type=float, default=1.0)
+    parser.add_argument(
+        "-b", "--border", help="Extrapolate outward from the original shape by this factor.", type=float, default=0.0)
+    parser.add_argument(
+        "-p", "--downscale", help="downscale image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
     parser.add_argument('-r', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
-    parser.add_argument('-a', "--sharpness", help="Sharpness constant for activation function, "+
+    parser.add_argument('-a', "--learning_rate_final",
+                        help="Reduce by multiplicative constant over <cycles> cycles.", type=float, default=None)
+    parser.add_argument("--sharpness", help="Sharpness constant for activation function, " +
                         "activation(excitation) = tanh(excitation*sharpness).", type=float, default=1000.0)
-    parser.add_argument("-g", '--gradient_sharpness', help="Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual" +
-                                                           " (very flat) gradient.  High values result in divider units not moving very much, too low" +
-                                                           " and they don't settle.", type=float, default=5.0)
-    parser.add_argument('-f', '--save_frames', help="Save frames during training to this directory (must exist).", type=str, default=None)
+    parser.add_argument('--gradient_sharpness', help="Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual" +
+                        " (very flat) gradient.  High values result in divider units not moving very much, too low" +
+                        " and they don't settle.", type=float, default=5.0)
+    parser.add_argument('-f', '--save_frames',
+                        help="Save frames during training to this directory (must exist).", type=str, default=None)
+    parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parsed = parser.parse_args()
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
 
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames,
-              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'max_cycles': parsed.cycles,
-              'learning_rate': parsed.learning_rate}
+              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles,
+              'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
     return parsed, kwargs
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     parsed, kwargs = get_args()
-    
-    if parsed.input_image is None and parsed.model_file is None:
-        raise Exception("Need input image (-i) or model file (-m).")
 
-    s = UIDisplay(image_file=parsed.input_image,state_file=parsed.model_file ,**kwargs)
+    if parsed.input_image is None and parsed.model_file is None:
+        raise Exception("Need input image (-i) to start training, or model file (-m) to continue.")
+
+    s = UIDisplay(image_file=parsed.input_image, state_file=parsed.model_file, **kwargs)
     s.run()

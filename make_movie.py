@@ -258,7 +258,6 @@ class MovieMaker(object):
         return frame
 
     def run(self):
-        import ipdb; ipdb.set_trace()
         frames = self._make_frame_sequence()
         if self.preview:
             self._preview(frames)

@@ -50,8 +50,8 @@ def test_make_input_grid():
     assert np.isclose(np.mean(grid[:, 0]), 0.0, atol=0.01)
     assert np.isclose(np.mean(grid[:, 1]), 0.0, atol=0.01)
 
-def add_text(image, text_lines, bbox, line_spacing = 1.5, max_font_scale=3.0, min_font_scale=0.1, 
-             font_face=cv2.FONT_HERSHEY_SIMPLEX, font_thickness=1, color=(128,128,128), justify='center'):
+def add_text(image, text_lines, bbox, line_spacing = 1.5, max_font_scale=3.0, min_font_scale=0.1, margin_xy=(15,5),
+             font_face=cv2.FONT_HERSHEY_SIMPLEX, font_thickness=1, color=(128,128,128), justify='center',v_spread=False):
     """ Add text to an image within a bounding box
     image: HxWx3 BGR image
     text_lines: list of strings, one per line
@@ -64,42 +64,66 @@ def add_text(image, text_lines, bbox, line_spacing = 1.5, max_font_scale=3.0, mi
     font_face = font_face
 
     font_scale = 3.0
-    max_lines = 0
-    width = x1 - x0
-    max_text_w = width *2.0
-    while len(text_lines) > max_lines or max_text_w > width and font_scale > min_font_scale:
-        font_scale -= 0.01
-        widths, heights = [],[]
-        for line in text_lines:
-            ((text_w, text_h), _) = cv2.getTextSize(line, font_face, font_scale, font_thickness)
-            widths.append(text_w)
-            heights.append(text_h)
-        max_text_w = max(widths)
-        text_h = max(heights)
+    width = x1 - x0 - 2*margin_xy[0]
+    height = y1 - y0 - 2*margin_xy[1]
+    test_text_width = width *2.0
+    test_text_height = height * 2.0
 
-        line_height = int(text_h * line_spacing)
-        max_lines = (y1 - y0) // line_height    
+    def _calc_y_spacing(font_scale, include_descenders = True):
+        """
+        calculate height of each line of text, space everything out vertically.
+        include_descenders: if True, include descender height in line height calculation
+        returns: array of line heights, vertical spacing between lines where:
+             n_lines * line_height + (n_lines-1)*spacing  + 1 descender_height = height
+            (the descender height is added to account for the last line's descender,
+            or is added to each if include_descenders is True)
+        """  
+        line_heights = []
+        y_text=0
+        for line in text_lines:
+            (w,h), b = cv2.getTextSize(line, font_face, font_scale, font_thickness)
+            b = b if include_descenders else 0
+            line_heights.append(h + b)
+        spacing = int((h+b) * (line_spacing-1))
+        return line_heights, spacing
+
+    def _calc_widths(font_scale):
+        widths = []
+        for line in text_lines:
+            (w,h), b = cv2.getTextSize(line, font_face, font_scale, font_thickness)
+            widths.append(w)
+        return widths
+
+    while (test_text_width > width or test_text_height > height) and font_scale > min_font_scale:
+        font_scale -= 0.01
+        widths = _calc_widths(font_scale)
+        test_text_width = max(widths)
+        line_heights, v_spacing = _calc_y_spacing(font_scale)
+        test_text_height = sum(line_heights) + v_spacing * (len(text_lines)-1)
 
     font_scale = np.clip(font_scale, min_font_scale, max_font_scale)
+    widths = _calc_widths(font_scale)
+    line_heights, v_spacing = _calc_y_spacing(font_scale)
 
-
-    total_text_height = len(text_lines) * line_height
-    y_start = y0 + (y1 - y0 - total_text_height) // 2 + text_h
-
+    extra_y_space = height - (sum(line_heights) + v_spacing * (len(text_lines)-1))
+    # recompute y so text is vertically centered.  At top is the top of the first line, bottom the baseline of last line.
+    y_start = y0 + extra_y_space // 2
+    
     for i, line in enumerate(text_lines):
-        y = y_start + i * line_height
-        ((text_w, text_h), _) = cv2.getTextSize(line, font_face, font_scale, font_thickness)
+        y_text = y_start + line_heights[i]   # add descender?
+
         if justify == 'left':
-            x = x0 + 5  # small left margin
+            x_text = x0
         elif justify == 'right':
-            x = x1 - text_w - 5  # small right margin
+            x_text = x1 - widths[i]
         elif justify == 'center':
-            x = x0 + (x1 - x0 - text_w) // 2  # center text horizontally
+            x_text = x0 + (x1 - x0 - widths[i]) // 2  # center text horizontally
         else:
             raise ValueError("Unknown justify option: %s" % justify)
-        cv2.putText(image, line, (x, y), font_face, font_scale, color, font_thickness, lineType=cv2.LINE_AA)
+        y_start = y_text + v_spacing
+        cv2.putText(image, line, (x_text, y_text), font_face, font_scale, color, font_thickness, lineType=cv2.LINE_AA)
 
-    #draw_bbox(image, bbox, color=(0, 255, 0), thickness=1)
+    #draw_bbox(image, bbox, color=(255, 255, 0), thickness=4)
 
 
 def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
@@ -113,7 +137,8 @@ def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
     cv2.rectangle(image, (x0, y0), (x1, y1), color, thickness)
         
 
-def captioned_frame(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0), **kwargs):
+def captioned_frame(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0),
+                    justify='center', line_spacing=1.5, font_face=cv2.FONT_HERSHEY_SIMPLEX, **kwargs):
     caption_h = caption_height_px
     pad_x, pad_y = caption_pad_xy
     img_cap = np.zeros((img.shape[0]+caption_h, img.shape[1], 3), dtype=np.uint8)
@@ -121,8 +146,9 @@ def captioned_frame(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), 
     img_cap[img.shape[0]:, :, :] = bkg_color
     img_cap[:img.shape[0], :img.shape[1], :] = img
     bbox = {'x': (pad_x, img.shape[1]-pad_x),
-            'y': (img.shape[0]+int(pad_y*1.5), img_cap.shape[0]-(pad_y//2))}
-    add_text(img_cap, caption, bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='center', color=txt_color, **kwargs)
+            'y': (img.shape[0]+int(pad_y)-2, img_cap.shape[0]-2)}
+    add_text(img_cap, caption, bbox,font_face=font_face, justify=justify, color=txt_color, line_spacing=line_spacing, **kwargs)
+    # draw_bbox(img_cap, bbox, color=(0, 255, 0), thickness=1)
     return img_cap
 
 def test_add_text():
@@ -130,8 +156,15 @@ def test_add_text():
     bbox = {'x': (50, 350), 'y': (50, 150)}
     text_lines = ["This is a test", "of the add_text function.", "It should center text", "within the bounding box."]
     add_text(img, text_lines, bbox, line_spacing=1.5)
-    cv2.rectangle(img, (bbox['x'][0], bbox['y'][0]), (bbox['x'][1], bbox['y'][1]), (0, 255, 0), 1)
+    draw_bbox(img, bbox, color=(0, 255, 0), thickness=1)
     cv2.imshow("Test Add Text", img)
+    cv2.waitKey(0)
+    img *=0
+    
+    text_lines = ['This is another test that is ','left justified [and 2 lines].']
+    add_text(img, text_lines, bbox, line_spacing=3.5, justify='left')
+    draw_bbox(img, bbox, color=(0, 255, 0), thickness=1)
+    cv2.imshow("Test Add Text Left Justified", img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
@@ -148,5 +181,6 @@ def test_captioned_frame():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    test_captioned_frame()
+    #test_captioned_frame()
+    test_add_text()
     logging.info("All tests passed.")

@@ -103,33 +103,34 @@ test_data_circular = {'frame_rate': 30,
                       }
 
 
-test_data_barn = {'frame_rate': 30,
+test_data_barn = {'frame_rate': 20,
                   'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
-                  'title_pause_sec': 5.0,
-                  'episode_initial_pause_sec': 2.0,
-                  'episode_final_pause_sec': 4.0,
+                  'title_pause_sec': 10.0,
+                  'episode_initial_pause_sec': .5,
+                  'episode_final_pause_sec': 5.0,
                   'txt_color': COLORS['text'],
                   'bkg_color': COLORS['bkg'],
                   'title_pad_px': 30,
                   'caption_pad_xy': (10, 5),
-                  'title': {'main': ('Optimal image approximation using',
-                                     '50 lines, 50 circles, 25 of each.'),
-                            'sub1': ('learn rates: 0.1, 0.01',
-                                     '            500 epochs each,',
-                                     '            1 frame = 25 epochs.'),
-                            'sub2': ('By:  Andrew T. Smith, 2025',
+                  'title': {'main': ('Optimal image approximation using:',
+                                     '  experiment 1:  50 lines  ',
+                                     '  experiment 2:  50 circles',
+                                     '  experiment 3:  25 of each.'),
+                            'sub1': ('1 frame = 50 epochs',),
+                            'sub2': ('by:  Andrew T. Smith, 2025',
                                      'github: andsmith/scalefree_image',),
                             'spacing_frac': 0.2,
-                            'max_font_scales': (None, 1.2, None)
+                            'max_font_scales': (None, 1.0, None)
                             },
                   'train_img': {'file': 'barn_train_25c-25l_20h_downscale=6.0.png',
                                 'caption': ['training image (99 x 54)'],
-                                'duration_sec': 5.0},
+                                'duration_sec': 5.0,
+                                'inter-episode_pause_sec': 3.0},
                   'episodes': [
                       {'input_pattern': r'movie\\barn_linear_50d_20h_cycle-????????.png',
-                       'caption': ['50 line units', '20 color units']},
+                       'caption': ['50 line units, 20 color units']},
                       {'input_pattern': r'movie\\barn_circular_50d_20h_cycle-????????.png',
-                       'caption': ['50 circle units', '20 color units']},
+                       'caption': ['50 circle units, 20 color units']},
                       {'input_pattern': r'movie_mix\\barn_output_25c-25l_20h_cycle-????????.png',
                        'caption': ['25 line units + 25 circle units, 20 color units',
                                         'epochs@LR: 250@1.0, 500@0.1, 500@0.01']},
@@ -172,6 +173,7 @@ still_life = {'frame_rate': 10,
               'bkg_color': COLORS['bkg'],
               'title_pad_px': 30,
               'caption_pad_xy': (10, 5),
+              'max_frame_cap_font_scale': 1.2,
               'title': {'main': ('Optimal image approximation using',
                                  ' 50 circle units + 100 line units,',
                                  ' 50 color units.'),
@@ -182,13 +184,12 @@ still_life = {'frame_rate': 10,
                         'max_font_scales': (None, 1.2, None)
                         },
               'train_img': {'file': 'still_life_train_50c-100l_32h_downscale=4.0.png',
-                            'caption': ['training image: %d x %d'],
+                            'caption': ['input data: %d x %d'],
                             'duration_sec': 5.0},
               'episodes': [
                   {'json_meta': r'still_life_metadata_50c-100l_32h.json',
-                   'caption': [{'txt': 'cycle: %d', 'meta_keys': ['cycle']},
-                               {'txt': 'learning rate: %.5f', 'meta_keys': ['learning_rate']},
-                               {'txt': 'loss: %.7f', 'meta_keys': ['loss']}]}
+                   'caption': [{'txt': 'cycle (50 epochs): %d, learning rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
+                               {'txt': 'output %i x %i, loss: %.7f', 'meta_keys': ['train_width', 'train_height', 'loss']}]}
               ]
               }
 
@@ -198,8 +199,11 @@ class MovieMaker(object):
         self.movie_data = movie_data
         self.output_file = output_file
         self.preview = preview
-        self.train_img = cv2.imread(self.movie_data['train_img']['file'])[
-            :, :, ::-1] if 'train_img' in self.movie_data else None
+        if 'train_img' in self.movie_data:
+            self.train_img = cv2.imread(self.movie_data['train_img']['file'])[:, :, ::-1]
+            logging.info("Loaded training image of shape:  %s" % (self.train_img.shape,))
+        else:
+            self.train_img = None
         self.frame_rate = self.movie_data['frame_rate']
         self.caption_height_px = self.movie_data['caption_height_px']
         self.episode_data = self.movie_data['episodes']
@@ -213,19 +217,23 @@ class MovieMaker(object):
         self.bkg_color = tuple(self.movie_data['bkg_color'])
         self._title_spacing_frac = self.movie_data['title']['spacing_frac']
         self._max_title_font_scales = self.movie_data['title'].get('max_font_scales', (None, None, None))
+        self._max_frame_cap_font_scale = self.movie_data.get('max_frame_cap_font_scale', 1.0)
         # self.episodes = self._load()
 
     def make_train_frame(self, size_wh):
         if self.train_img is None:
             raise ValueError("No training image provided in movie data.")
         train_img = self.train_img[:, :, ::-1]
+        if '%' in self.movie_data['train_img']['caption'][0]:  # TODO better way to detect this
+            caption_top = self.movie_data['train_img']['caption'][0] % (train_img.shape[1], train_img.shape[0])
+        else:
+            caption_top = self.movie_data['train_img']['caption'][0]
         if (train_img.shape[1], train_img.shape[0]) != size_wh:
             logging.warning(f"Resizing training image from ({train_img.shape[1]}, {train_img.shape[0]}) to {size_wh}")
             train_img = cv2.resize(train_img, size_wh, interpolation=cv2.INTER_AREA)
-        caption_top = self.movie_data['train_img']['caption'][0] % (train_img.shape[1], train_img.shape[0])
         captions = [caption_top] + self.movie_data['train_img']['caption'][1:]
-        frame = captioned_frame(train_img, captions, self.caption_height_px, self.caption_pad_xy,
-                                txt_color=self.txt_color, bkg_color=self.bkg_color)
+        frame = captioned_frame(train_img, captions, self.caption_height_px, self.caption_pad_xy, max_font_scale=self._max_frame_cap_font_scale,
+                                txt_color=self.txt_color, bkg_color=self.bkg_color, font_face=cv2.FONT_HERSHEY_COMPLEX, line_spacing=1.5)
         return frame
 
     def make_title_frame(self, size_wh, spacing_frac=0.0, max_font_scales=(None, None, None)):
@@ -274,17 +282,17 @@ class MovieMaker(object):
         frame = np.zeros((size_wh[1], size_wh[0], 3), dtype=np.uint8)
         frame[:, :] = self.bkg_color
         kwargs = {} if max_font_scales[0] is None else {'max_font_scale': max_font_scales[0]}
-        add_text(frame, self.title_txt['main'], main_bbox, font_face=cv2.FONT_HERSHEY_COMPLEX,
-                 justify='center', color=self.txt_color, line_spacing=2.5, **kwargs)
+        add_text(frame, self.title_txt['main'], main_bbox, font_face=cv2.FONT_HERSHEY_DUPLEX,
+                 justify='left', color=self.txt_color, line_spacing=1.5, **kwargs)
 
         if len(self.title_txt['sub1']) > 0:
             kwargs = {} if max_font_scales[1] is None else {'max_font_scale': max_font_scales[1]}
-            add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=2.5,
-                     font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='left', color=self.txt_color, **kwargs)
+            add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=1.5,
+                     font_face=cv2.FONT_HERSHEY_COMPLEX, justify='left', color=self.txt_color, **kwargs)
         if len(self.title_txt['sub2']) > 0:
             kwargs = {} if max_font_scales[2] is None else {'max_font_scale': max_font_scales[2]}
             add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
-                     justify='left', line_spacing=2.5, color=self.txt_color, **kwargs)
+                     justify='left', line_spacing=1.5, color=self.txt_color, **kwargs)
         return frame
 
     def run(self):
@@ -295,9 +303,12 @@ class MovieMaker(object):
         if self.output_file is not None:
             # Check all frames are the same size
             frame_size = frames[0].shape[1], frames[0].shape[0]
-            for f in frames:
+            for f_i, f in enumerate(frames):
+                print(f.shape)
                 if (f.shape[1], f.shape[0]) != frame_size:
-                    raise ValueError("All frames must have the same size to write movie, but found differing sizes.")
+                    logging.warning("Frame size mismatch:  %s should be %s, resizing..." %
+                                    ((f.shape[1], f.shape[0]), frame_size))
+                    frames[f_i] = cv2.resize(f, frame_size, interpolation=cv2.INTER_AREA)
             self._write_movie(frames)
 
     def _preview(self, frames):
@@ -329,7 +340,7 @@ class MovieMaker(object):
 
             key = cv2.waitKey(1)
             if key == 27 or key == ord('q'):
-                user_quit = True    
+                user_quit = True
                 break
         if user_quit:
             logging.info("User requested exit from preview.")
@@ -366,6 +377,12 @@ class MovieMaker(object):
                 raise ValueError(f"Failed to read image file for frame {f_i}:  {f}")
             frames.append(img)
 
+        if meta is not None:
+            # Some keys need to be extracted from the frames, get those now
+            for m, f in zip(meta, frames):
+                m['train_width'] = f.shape[1]
+                m['train_height'] = f.shape[0]
+
         if not frames:
             raise ValueError(f"No valid image files found for episode with pattern:  {episode['input_pattern']}")
         logging.info(f"Loaded {len(frames)} frames for episode.")
@@ -399,13 +416,12 @@ class MovieMaker(object):
             # Need to make custom captions from the metadata for each frame
             frame_captions = [self._make_frame_caption(m, episode['caption']) for m in meta]
 
-        frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy,
-                                  txt_color=self.txt_color, bkg_color=self.bkg_color) for f, c in zip(frames, frame_captions)]
+        frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy, justify='left', max_font_scale=self._max_frame_cap_font_scale,
+                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.1) for f, c in zip(frames, frame_captions)]
 
-        intro_frame = frames[0]
-        outro_frame = frames[-1]
-        frames = self._mk_seq(intro_frame, self.initial_pause_sec) + frames + \
-            self._mk_seq(outro_frame, self.final_pause_sec)
+        intro_frames = self._mk_seq(frames[0], self.initial_pause_sec)
+        outro_frames = self._mk_seq(frames[-1], self.final_pause_sec)
+        frames = intro_frames + frames + outro_frames
 
         return frames
 
@@ -419,11 +435,16 @@ class MovieMaker(object):
                                             max_font_scales=self._max_title_font_scales)
 
         frames = self._mk_seq(title_frame, self.title_dur_sec,)
+        short_train_seq = []
         if self.train_img is not None:
-            train_frame = self.make_train_frame(img_size)  # don't include caption in size, this adds one
-            frames += self._mk_seq(train_frame, self.movie_data['train_img']['duration_sec'])
-        for seq in episode_sequences:
-            frames += seq
+            train_frame = self.make_train_frame(img_size)
+            train_seq = self._mk_seq(train_frame, self.movie_data['train_img']['duration_sec'])
+            short_train_seq = self._mk_seq(
+                train_frame,  self.movie_data['train_img'].get('inter-episode_pause_sec', 2.0))
+
+            frames += train_seq
+        for seq_no, seq in enumerate(episode_sequences):
+            frames += seq + (short_train_seq if (seq_no < len(episode_sequences)-1) else [])
         return frames
 
     def _mk_seq(self, frame, dur_sec):
@@ -572,7 +593,7 @@ if __name__ == "__main__":
     # load data
     if args.movie_json is None:
 
-        movie_data = deepcopy(still_life)
+        movie_data = deepcopy(test_data_barn)
         logging.info("No movie json file provided, using built-in test data, has %i episodes." %
                      (len(movie_data['episodes']),))
     else:
@@ -595,6 +616,8 @@ if __name__ == "__main__":
         title_frame = movie_maker.make_title_frame((800, 600),
                                                    movie_data['title']['spacing_frac'],
                                                    max_font_scales=movie_data['title']['max_font_scales'])
+        import ipdb
+        ipdb.set_trace()
         train_frame = movie_maker.make_train_frame((800, 600))
         cv2.imwrite('example_title.png', title_frame[:, :, ::-1])
         logging.info("No output mp4 file provided, wrote title frame to: example_title.png")

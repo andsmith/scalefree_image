@@ -22,7 +22,7 @@ Lines are parameterized by center point $(C_x, C_y)$ and angle $\theta$.  The er
 The Excitation of line unit $j$ with centers $C_j$ and angles $\theta_j$ given input $X_i = (x_i,y_i)$ is defined 
 
 $$
-E_j(X_i)\frac{(X_i - C_j) \cdot [\cos(\theta_j), \sin(\theta_j)]}{||X_i - C_j||}
+E_j(X_i)\frac{(X_i - C_j) \cdot [\cos(\theta_j), \sin(\theta_j)]^\top}{||X_i - C_j||}
 $$
 
 I.e., cosine for the angle between the vector from center to input and the line.

@@ -163,6 +163,34 @@ test_data_barn_meta = {'frame_rate': 10,
                                         {'txt': 'loss: %.7f', 'meta_keys': ['loss']}]}
                        ]
                        }
+still_life = {'frame_rate': 10,
+              'caption_height_px': 80,  # shrink/grow if if you need more/fewer lines of text
+              'title_pause_sec': 5.0,
+              'episode_initial_pause_sec': 2.0,
+              'episode_final_pause_sec': 4.0,
+              'txt_color': COLORS['text'],
+              'bkg_color': COLORS['bkg'],
+              'title_pad_px': 30,
+              'caption_pad_xy': (10, 5),
+              'title': {'main': ('Optimal image approximation using',
+                                 ' 50 circle units + 100 line units,',
+                                 ' 50 color units.'),
+                        'sub1': ('Image by: Clara Peeters, ca. 1610,',),
+                        'sub2': ('Code by:  Andrew T. Smith, 2025',
+                                 'github: andsmith/scalefree_image',),
+                        'spacing_frac': 0.2,
+                        'max_font_scales': (None, 1.2, None)
+                        },
+              'train_img': {'file': 'still_life_train_50c-100l_32h_downscale=4.0.png',
+                            'caption': ['training image: %d x %d'],
+                            'duration_sec': 5.0},
+              'episodes': [
+                  {'json_meta': r'still_life_metadata_50c-100l_32h.json',
+                   'caption': [{'txt': 'cycle: %d', 'meta_keys': ['cycle']},
+                               {'txt': 'learning rate: %.5f', 'meta_keys': ['learning_rate']},
+                               {'txt': 'loss: %.7f', 'meta_keys': ['loss']}]}
+              ]
+              }
 
 
 class MovieMaker(object):
@@ -194,8 +222,10 @@ class MovieMaker(object):
         if (train_img.shape[1], train_img.shape[0]) != size_wh:
             logging.warning(f"Resizing training image from ({train_img.shape[1]}, {train_img.shape[0]}) to {size_wh}")
             train_img = cv2.resize(train_img, size_wh, interpolation=cv2.INTER_AREA)
-        frame = captioned_frame(train_img, self.movie_data['train_img']['caption'], self.caption_height_px,
-                                self.caption_pad_xy, txt_color=self.txt_color, bkg_color=self.bkg_color)
+        caption_top = self.movie_data['train_img']['caption'][0] % (train_img.shape[1], train_img.shape[0])
+        captions = [caption_top] + self.movie_data['train_img']['caption'][1:]
+        frame = captioned_frame(train_img, captions, self.caption_height_px, self.caption_pad_xy,
+                                txt_color=self.txt_color, bkg_color=self.bkg_color)
         return frame
 
     def make_title_frame(self, size_wh, spacing_frac=0.0, max_font_scales=(None, None, None)):
@@ -250,17 +280,18 @@ class MovieMaker(object):
         if len(self.title_txt['sub1']) > 0:
             kwargs = {} if max_font_scales[1] is None else {'max_font_scale': max_font_scales[1]}
             add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=2.5,
-                    font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='left', color=self.txt_color, **kwargs)
+                     font_face=cv2.FONT_HERSHEY_SIMPLEX, justify='left', color=self.txt_color, **kwargs)
         if len(self.title_txt['sub2']) > 0:
             kwargs = {} if max_font_scales[2] is None else {'max_font_scale': max_font_scales[2]}
             add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
-                    justify='left', line_spacing=2.5, color=self.txt_color, **kwargs)
+                     justify='left', line_spacing=2.5, color=self.txt_color, **kwargs)
         return frame
 
     def run(self):
         frames = self._make_frame_sequence()
         if self.preview:
-            self._preview(frames)
+            while not self._preview(frames):
+                logging.info("Restarting preview, hit 'q' or ESC in the preview window to exit.")
         if self.output_file is not None:
             # Check all frames are the same size
             frame_size = frames[0].shape[1], frames[0].shape[0]
@@ -275,7 +306,7 @@ class MovieMaker(object):
         n_frames = 0
         max_delay = 1.0 / self.frame_rate
         sleep_times = []
-
+        user_quit = False
         for i, frame in enumerate(frames):
             now = time.perf_counter()
             delay = now - last_time
@@ -298,9 +329,13 @@ class MovieMaker(object):
 
             key = cv2.waitKey(1)
             if key == 27 or key == ord('q'):
+                user_quit = True    
                 break
-
-        cv2.destroyAllWindows()
+        if user_quit:
+            logging.info("User requested exit from preview.")
+            cv2.destroyAllWindows()
+            return True
+        return False
 
     def _load_episode_frames(self, episode):
         frames = []
@@ -335,6 +370,7 @@ class MovieMaker(object):
             raise ValueError(f"No valid image files found for episode with pattern:  {episode['input_pattern']}")
         logging.info(f"Loaded {len(frames)} frames for episode.")
         return frames, meta
+
     def _make_frame_caption(self, meta, base_caption):
         """
         :param meta: metadata dictionary to take values for the caption from.
@@ -364,11 +400,12 @@ class MovieMaker(object):
             frame_captions = [self._make_frame_caption(m, episode['caption']) for m in meta]
 
         frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy,
-                                    txt_color=self.txt_color, bkg_color=self.bkg_color) for f,c in zip(frames, frame_captions)]
+                                  txt_color=self.txt_color, bkg_color=self.bkg_color) for f, c in zip(frames, frame_captions)]
 
         intro_frame = frames[0]
         outro_frame = frames[-1]
-        frames = self._mk_seq(intro_frame, self.initial_pause_sec) + frames + self._mk_seq(outro_frame, self.final_pause_sec)
+        frames = self._mk_seq(intro_frame, self.initial_pause_sec) + frames + \
+            self._mk_seq(outro_frame, self.final_pause_sec)
 
         return frames
 
@@ -500,8 +537,8 @@ class MovieMaker(object):
         i.e. ending with the frame number with leading zeros, then an extension.
         Sort the metadata list by this number.
         """
-        
-        n_digits = len( re.search(r'([0-9]+)\.[a-zA-Z0-9]', meta[0]['filename']).group(1) )
+
+        n_digits = len(re.search(r'([0-9]+)\.[a-zA-Z0-9]', meta[0]['filename']).group(1))
         regex_pattern = r'(\d{' + str(n_digits) + r'})'
         regex = re.compile(regex_pattern)
 
@@ -535,7 +572,7 @@ if __name__ == "__main__":
     # load data
     if args.movie_json is None:
 
-        movie_data = deepcopy(test_data_barn_meta)
+        movie_data = deepcopy(still_life)
         logging.info("No movie json file provided, using built-in test data, has %i episodes." %
                      (len(movie_data['episodes']),))
     else:

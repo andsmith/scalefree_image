@@ -593,7 +593,7 @@ if __name__ == "__main__":
     # load data
     if args.movie_json is None:
 
-        movie_data = deepcopy(test_data_barn)
+        movie_data = deepcopy(still_life)
         logging.info("No movie json file provided, using built-in test data, has %i episodes." %
                      (len(movie_data['episodes']),))
     else:
@@ -616,8 +616,6 @@ if __name__ == "__main__":
         title_frame = movie_maker.make_title_frame((800, 600),
                                                    movie_data['title']['spacing_frac'],
                                                    max_font_scales=movie_data['title']['max_font_scales'])
-        import ipdb
-        ipdb.set_trace()
         train_frame = movie_maker.make_train_frame((800, 600))
         cv2.imwrite('example_title.png', title_frame[:, :, ::-1])
         logging.info("No output mp4 file provided, wrote title frame to: example_title.png")

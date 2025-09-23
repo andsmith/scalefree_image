@@ -22,7 +22,7 @@ Lines are parameterized by center point $(C_x, C_y)$ and angle $\theta$.  The er
 The Excitation of line unit $j$ with centers $C_j$ and angles $\theta_j$ given input $X_i = (x_i,y_i)$ is defined 
 
 $$
-E_j(X_i)\frac{(X_i - C_j) \cdot \begin{pmatrix} \cos(\theta_j) \\ \sin(\theta_j) \end{pmatrix}}{||X_i - C_j||}
+E_j(X_i)\frac{(X_i - C_j) \cdot [\cos(\theta_j), \sin(\theta_j)]}{||X_i - C_j||}
 $$
 
 I.e., cosine for the angle between the vector from center to input and the line.
@@ -129,8 +129,12 @@ Running to generate an image from a trained model:
 * **just_image**: just generate the image from a saved model (using param `-m` or `--model_file` with the model `.pkl` file)
 * **disp_mult**:  Generate a high resolution image by using a large value here (it is multiples of the downscaled training image size).
 
-## Videos
+## Videos (images are Youtube links)
 run `> python make_movie.py --help` to see options for making movies from saved frames.
+
+Here's a video with 50 circles, then 50 lines, then 25 of each:
+[![25 circles + 25 lines](assets/barn_movie_icon.png)](https://www.youtube.com/watch?v=cY2cz9gjLf0)
+
 
 Click the image for a link to a video showing the process with different numbers of linear dividers.  How many does it take for you to recognize the image?
 
@@ -139,7 +143,6 @@ Click the image for a link to a video showing the process with different numbers
 Click this image to see the same for circular dividers.
 
 [![32 circular dividers](assets/mona_lisa_circular_32d_16h_cycle-00000112.png)](https://youtube.com/shorts/e53WyUZP48k)
-
 
 ####  Gallery
 

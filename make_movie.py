@@ -417,7 +417,7 @@ class MovieMaker(object):
             frame_captions = [self._make_frame_caption(m, episode['caption']) for m in meta]
 
         frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy, justify='left', max_font_scale=self._max_frame_cap_font_scale,
-                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.1) for f, c in zip(frames, frame_captions)]
+                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.5) for f, c in zip(frames, frame_captions)]
 
         intro_frames = self._mk_seq(frames[0], self.initial_pause_sec)
         outro_frames = self._mk_seq(frames[-1], self.final_pause_sec)

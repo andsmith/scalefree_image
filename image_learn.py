@@ -127,13 +127,9 @@ class ScaleInvariantImage(object):
         
         if self._center_weight_params is not None:
             train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
-            self._weight_grid = make_central_weights(train_img_size_wh, 
-                                                     max_weight=self._center_weight_params['weight'],
-                                                     rad_rel=self._center_weight_params['sigma'], 
-                                                     flatness=self._center_weight_params['flatness'],
-                                                     offsets_rel=self._center_weight_params['xy_offsets_rel'])
+            self._weight_grid = make_central_weights(train_img_size_wh, **self._center_weight_params)
             logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
-                         (self._center_weight_params['weight'], self._center_weight_params['sigma'], train_img_size_wh))
+                         (self._center_weight_params['weight_max'], self._center_weight_params['weight_min'], train_img_size_wh))
             self._sample_weights = self._weight_grid.reshape(-1)
             self.weight_cross_sections = {'x': self._weight_grid[self._weight_grid.shape[0]//2,:],
                                           'y': self._weight_grid[:,self._weight_grid.shape[1]//2]}
@@ -673,7 +669,9 @@ class UIDisplay(object):
                 if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
                     # apply contour lines at 20% intervals
                     n_cont = 7
-                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(0.0, self._center_weight_params['weight'], n_cont, endpoint=True)[1:]]
+                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l)
+                                      for l in np.linspace(self._center_weight_params['weight_min'], 
+                                                           self._center_weight_params['weight_max'], n_cont, endpoint=True)[1:]]
                     colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
                     for level_ind, contours in enumerate(contour_levels):
                         for contour in contours:
@@ -703,7 +701,7 @@ class UIDisplay(object):
                     # turn off x axis labels, tickes
                     weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
                                             left=True, right=False, bottom=False, top=False)
-                    weight_ax.set_ylim(0.0, self._center_weight_params['weight'] * 1.1)
+                    weight_ax.set_ylim(self._center_weight_params['weight_min']*0.9, self._center_weight_params['weight_max']*1.1)
                     # add grid
                     weight_ax.grid(which='both', axis='y')
                     weights_plotted=True
@@ -822,16 +820,19 @@ def get_args():
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("-w", "--weigh_center", 
-                        help="Weigh pixels nearer the center higher during training by this radius / spread / flatness and x, y offsets.",
-                        nargs=5, type=float, default=[1.0, 2.0])
+                        help="Weigh pixels nearer the center higher during training with thes params: val_min val_max rad_in rad_out x_offset y_offset" +
+                        "  Where the weight is val_max inside the rad_in and val_min outside rad_out, and linearly sloping between,"+
+                        "  Negative values are allowed but will be clipped to zero weight."
+                        nargs=5, type=float, default=[1.0, 1.0, 1.0, 1.0, .5, 0.5])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parsed = parser.parse_args()
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
-    center_weight = {'weight': parsed.weigh_center[0], 
-                     'flatness': parsed.weigh_center[2],
-                     "xy_offsets_rel": (parsed.weigh_center[3], parsed.weigh_center[4]),
-                     'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
+    center_weight = {'weight_max': parsed.weigh_center[0],
+                     'weight_min': parsed.weigh_center[1],
+                     'rad_in': parsed.weigh_center[2],
+                     'rad_out': parsed.weigh_center[3],
+                     'xy_offsets_rel': (parsed.weigh_center[4], parsed.weigh_center[5])} if parsed.weigh_center[0] != 1.0 else None
     # print("CENTER WEIGHT PARAMS:  ", center_weight)
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,

@@ -170,44 +170,42 @@ def test_add_text():
     cv2.destroyAllWindows()
     
     
-def make_central_weights(img_size_wh, max_weight=10.0, rad_rel=0.5, offsets_rel=(0.5,0.5), flatness = 0.0):
-    """
-    Make a weight matrix that weights pixels near the center more heavily using a Gaussian falloff 
-    :param img_size_wh: (width, height) of the image
-    :param max_weight: maximum weight at the center
-    :param rad_rel: radius (relative to half the image diagonal) at which the weight falls to 50% of max_weight
-    :param offsets_rel: (x,y) offsets of the center relative to image size (0.5,0.5 = center of image)
-    :param flatness: The values above this fraction of max_weight are clipped, then everything
-    is scaled to [1.0, max_weight].  (0.0 = no clipping, 1.0 = all weights are max_weight)
-    :return: weight matrix of shape (height, width)
+def make_central_weights(img_size_wh, weight_min, weight_max, rad_in, rad_out, xy_offset_rel=(0.5,0.5)) :
+    """ Make a grid of weights that emphasize the center of the image
+    img_size_wh: (width, height) of the image
+    max_weight: maximum weight at the center of the image
+    rad_in:  radius of circle in which weight is max_weight
+    rad_out: radius at which weight falls to weight_min
+    xy_offset_rel: (x_rel, y_rel) relative offset of center from image center (0.5,0.5 = center) of circle centers
+    returns: 2D array of weights
     """
     w, h = img_size_wh
-    x_offset, y_offset = (offsets_rel[0]-0.5)*w, (offsets_rel[1]-0.5)*h
-    yv, xv = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
-    cx, cy = (w-1)/2.0 + x_offset, (h-1)/2.0 + y_offset
-    rad = np.sqrt((xv - cx)**2 + (yv - cy)**2)
-    max_rad = np.sqrt((w/2.0)**2 + (h/2.0)**2)
-    sigma = rad_rel * max_rad / np.sqrt(2.0 * np.log(2.0))  # so that weight is half max_weight at rad_rel * max_rad
-    weights = 1.0 + (max_weight - 1.0) * np.exp(-0.5 * (rad/sigma)**2)
-    weights = weights - np.min(weights) 
-    weights = weights / np.max(weights) * (max_weight-1.0) 
-    if flatness > 0.0:
-        nonflatness = 1.0 - flatness
-        clip_val = weights.max() * nonflatness
-        print("Clipping weights above %.3f (%.1f%% of max)" % (clip_val, nonflatness*100.0))
-        weights = np.clip(weights, 1.0, clip_val)
-        weights = (weights - np.min(weights)) / (np.max(weights) - np.min(weights)) * (max_weight - 1.0) + 1.0
-    return weights.astype(np.float32)   
-
+    x_center = int(w * xy_offset_rel[0])
+    y_center = int(h * xy_offset_rel[1])
+    Y, X = np.ogrid[:h, :w]
+    dist_from_center = np.sqrt((X - x_center)**2 + (Y - y_center)**2)
+    weights = np.ones((h, w), dtype=np.float32) * weight_min
+    inside_in = dist_from_center <= rad_in
+    between = (dist_from_center > rad_in) & (dist_from_center < rad_out)
+    outside_out = dist_from_center >= rad_out
+    weights[inside_in] = weight_max
+    weights[outside_out] = weight_min
+    # linear falloff between rad_in and rad_out
+    weights[between] = weight_max - (weight_max - weight_min) * ((dist_from_center[between] - rad_in) / (rad_out - rad_in))
+    return weights
+    
+    
 def test_make_central_weights():
     shapes = [(100, 100), (200, 140), (130, 200)]
     weight = 5.0
     rad_rels = [0.1, 0.3, 0.5, .75, .9]
-    flatness = 0.5
     fig, axes = plt.subplots(len(shapes)*2, len(rad_rels), figsize=(16, 10))
     for i, shape in enumerate(shapes):
         for j, rad_rel in enumerate(rad_rels):
-            w = make_central_weights(shape, max_weight=weight, rad_rel=rad_rel, flatness=flatness)
+            w = make_central_weights(shape,weight_max=5.0, weight_min = 0,
+                                      rad_in=.4,
+                                      rad_out=.6,
+                                      xy_offset_rel=(0.5,0.5))
 
             ax_image = axes[i*2, j]
             ax_cross_section = axes[i*2+1, j]

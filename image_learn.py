@@ -76,8 +76,15 @@ class ScaleInvariantImage(object):
                 logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
                                 (image_raw.shape, self.image_raw.shape))
                 self.image_raw = image_raw
+                
+            if self._downscale != downscale:
+                logging.info("Warning: Command-line is overriding model's downscale factor:  was %.3f, using %.3f" %
+                                (self._downscale, downscale))
+                self._downscale = downscale
         else:
             weights = None
+            
+        
 
             
         # Cache this
@@ -98,6 +105,8 @@ class ScaleInvariantImage(object):
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
     def _make_train(self, downscale, keep_aspect=True):
+        
+        print("\n\n\nMaking input with downscale:  %.3f\n\n" % (downscale,))
         if self._last_downscale is not None and self._last_downscale == downscale:
             return self._input, self._output
         self._last_downscale = downscale
@@ -267,13 +276,14 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, run_cycles=0,
+    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_div = n_div
         self.n_hidden = n_hidden
+        self._update_plots = False
         self._run_cycles = run_cycles
         self._shutdown = False
         self._frame_dir = frame_dir
@@ -286,6 +296,7 @@ class UIDisplay(object):
         self._output_image = None
         self._loss_history = []
         self._l_rate_history = []
+        self._batch_size = batch_size
         self._nogui = nogui
         self._metadata = []
         if learning_rate_final is not None:
@@ -293,10 +304,12 @@ class UIDisplay(object):
                 raise Exception("Final learning rate must be non-negative for annealing.")
             if self._run_cycles <= 0:
                 raise Exception("Must specify run_cycles > 0 if annealing with learning_rate_final.")
-
-            self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / (self._run_cycles-1)) if self._run_cycles > 1 else 1.0
-            logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles." %
-                         (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles))
+            if learning_rate >0:
+                self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / (self._run_cycles-1)) if self._run_cycles > 1 else 1.0
+                logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles." %
+                            (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles))
+            else:
+                self._learning_rate_decay = 0.0
         else:
             self._learning_rate_decay = None
 
@@ -310,7 +323,7 @@ class UIDisplay(object):
         # model/image file prefix is the image bare name without extension
         self._file_prefix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
 
-        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate_initial=self._learn_rate,
+        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate_initial=self._learn_rate,batch_size=self._batch_size,
                                         state_file=state_file, image_raw=self._image_raw, downscale=self._downscale, **kwargs)
 
         # Check for metadata file
@@ -420,8 +433,8 @@ class UIDisplay(object):
         while (max_iter==0 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
-            logging.info("Training batch_size: %i, cycle: %i, learning_rate: %.6f" %
-                         (self._sim.batch_size, self._sim.cycle, self._learn_rate))
+            logging.info("Training batch_size: %i, cycle: %i of %i, learning_rate: %.6f" %
+                         (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
 
             new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate)
             self._l_rate_history.append(self._learn_rate)
@@ -510,11 +523,13 @@ class UIDisplay(object):
         logging.info("Started worker thread.")
 
     def _keypress_callback(self, event):
-        if event.key == 'x' or event.key == 'escape':
+        if event.key == 'x' or event.key == 'escape' or event.key == 'q':
             logging.info("Shutdown requested, waiting for worker to finish...")
             self._shutdown = True
         elif event.key == 'a':
             self._show_all_hist = not self._show_all_hist
+            logging.info("Toggled loss history display mode:  %s" % ("all cycles" if self._show_all_hist else "last 5 cycles only",))   
+            self._update_plots = True
         else:
             logging.info("Unassigned key: %s" % (event.key,))
 
@@ -579,15 +594,16 @@ class UIDisplay(object):
         loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
         loss_ax.set_ylabel("Loss")
         cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
-        loss_ax.set_title("Training Loss History\n%s" % (  cmd,))
+        loss_ax.set_title("Training Loss History\n%s\n1 dot = 1 minibatch (%i samples)" % (  cmd, self._batch_size))
 
         lrate_ax.set_ylabel("Learning Rate")
-        lrate_ax.set_title("Learning Rate History")
+        lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
         lrate_ax.set_yscale('log')
 
         fig.canvas.mpl_connect('key_press_event', self._keypress_callback)
 
         artists = {'loss': None, 'train_img': None, 'out_img': None}
+        self._update_plots = False # set when user changes something that requires a plot update
 
         # start main UI loop (training is in the thread):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
@@ -598,12 +614,13 @@ class UIDisplay(object):
                     artists['train_img'] = train_ax.imshow(self._sim.image_train)
                 else:
                     artists['train_img'].set_data(self._sim.image_train)
-                train_ax.set_title("Training Image %s\nCycle %i/%i, downscale:  %.2f" %
-                    (self._sim.image_train.shape, self._cycle+1, self._run_cycles, self._downscale))
+                train_ax.set_title("\nTraining cycle %i/%s...\ntarget image %i x %i" %
+                    (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
+                     self._sim.image_train.shape[1], self._sim.image_train.shape[0]))
 
                 if self._output_image is not None:
                     # Can take a while to generate the first image
-                    out_ax.set_title("Output Image %s\nloss: %.5f" % (self._output_image.shape, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0))
+                    out_ax.set_title("loss: %.5f\nOutput Image %s\n" % (self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
 
                     if artists['out_img'] is None:
                         artists['out_img'] = out_ax.imshow(self._output_image)
@@ -613,7 +630,7 @@ class UIDisplay(object):
                         out_ax.axis("off")
                         out_ax.set_aspect('equal')
 
-                if len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle:
+                if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
                     """
                     Plot the individual minibatch losses, and their mean per cycle on top.   
                     """
@@ -661,7 +678,7 @@ class UIDisplay(object):
                 fig.tight_layout()
                 plt.draw()
                 fig.canvas.flush_events()  # Force canvas to update
-                plt.pause(0.01)
+                plt.pause(0.2)
                 
             except Exception as e:
                 logging.error(f"Error updating GUI: {e}")

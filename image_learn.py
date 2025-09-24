@@ -670,7 +670,7 @@ class UIDisplay(object):
                 img_out = self._sim.image_train.copy()
                 if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
                     # apply contour lines at 20% intervals
-                    n_cot = 10
+                    n_cont = 10
                     contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(0.0, self._center_weight_params['weight'], n_cont, endpoint=True)[1:]]
                     colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
                     for level_ind, contours in enumerate(contour_levels):

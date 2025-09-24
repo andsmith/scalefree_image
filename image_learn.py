@@ -670,7 +670,7 @@ class UIDisplay(object):
                 img_out = self._sim.image_train.copy()
                 if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
                     # apply contour lines at 20% intervals
-                    n_cont = 10
+                    n_cont = 7
                     contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(0.0, self._center_weight_params['weight'], n_cont, endpoint=True)[1:]]
                     colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
                     for level_ind, contours in enumerate(contour_levels):
@@ -691,12 +691,13 @@ class UIDisplay(object):
             if not weights_plotted:
                 if self._center_weight_params is not None and self._sim.weight_cross_sections is not None and weight_ax is not None:
                     weight_ax.cla()
-                    weight_ax.plot(self._sim.weight_cross_sections['x'], 'r-')
-                    #weight_ax.plot(self._sim.weight_cross_sections['y'], 'b-', label='Y cross-section')
+                    xc, yc = self._sim.weight_cross_sections['x'], self._sim.weight_cross_sections['y']
+                    weight_ax.plot(np.linspace(0, 1.0, xc.size), xc, 'r-', label='X cross-section')
+                    weight_ax.plot(np.linspace(0, 1.0, yc.size), yc, 'b-', label='Y cross-section')
                     weight_ax.set_title("Sample Weights Cross-Sections")
                     #weight_ax.set_ylabel("Relative Weight")
                     #weight_ax.set_xlabel("Pixel Index")
-                    #weight_ax.legend()
+                    weight_ax.legend(fontsize=8)
                     # turn off x axis labels, tickes
                     weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
                                             left=True, right=False, bottom=False, top=False)

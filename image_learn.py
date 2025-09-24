@@ -127,9 +127,11 @@ class ScaleInvariantImage(object):
         
         if self._center_weight_params is not None:
             train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
-            self._weight_grid = make_central_weights(train_img_size_wh, max_weight=self._center_weight_params['weight'],
-                                                       rad_rel=self._center_weight_params['sigma'],
-                                                       offsets_rel=self._center_weight_params['xy_offsets_rel'])
+            self._weight_grid = make_central_weights(train_img_size_wh, 
+                                                     max_weight=self._center_weight_params['weight'],
+                                                     rad_rel=self._center_weight_params['sigma'], 
+                                                     flatness=self._center_weight_params['flatness'],
+                                                     offsets_rel=self._center_weight_params['xy_offsets_rel'])
             logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
                          (self._center_weight_params['weight'], self._center_weight_params['sigma'], train_img_size_wh))
             self._sample_weights = self._weight_grid.reshape(-1)
@@ -755,7 +757,8 @@ class UIDisplay(object):
                     artists['lrate'].set_data(lrate_x, lrate_y)
                 first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
                 lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
-                
+                lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
+
                 # set shared x limit
                 if  self._show_all_hist:
                     x_max = self._cycle + (self._cycle+1)/20 
@@ -818,15 +821,18 @@ def get_args():
                         " and they don't settle.", type=float, default=5.0)
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
-    parser.add_argument("-w", "--weigh_center", help="Weigh pixels nearer the center higher during training by this radius / factor and x, y offsets.",nargs=4, type=float, default=[1.0, 2.0])
+    parser.add_argument("-w", "--weigh_center", 
+                        help="Weigh pixels nearer the center higher during training by this radius / spread / flatness and x, y offsets.",
+                        nargs=5, type=float, default=[1.0, 2.0])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parsed = parser.parse_args()
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
     center_weight = {'weight': parsed.weigh_center[0], 
-                     "xy_offsets_rel": (parsed.weigh_center[2], parsed.weigh_center[3]),
+                     'flatness': parsed.weigh_center[2],
+                     "xy_offsets_rel": (parsed.weigh_center[3], parsed.weigh_center[4]),
                      'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
-    
+    # print("CENTER WEIGHT PARAMS:  ", center_weight)
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,

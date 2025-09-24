@@ -170,13 +170,15 @@ def test_add_text():
     cv2.destroyAllWindows()
     
     
-def make_central_weights(img_size_wh, max_weight=10.0, rad_rel=0.5, offsets_rel=(0.5,0.5)):
+def make_central_weights(img_size_wh, max_weight=10.0, rad_rel=0.5, offsets_rel=(0.5,0.5), flatness = 0.0):
     """
     Make a weight matrix that weights pixels near the center more heavily using a Gaussian falloff 
     :param img_size_wh: (width, height) of the image
     :param max_weight: maximum weight at the center
     :param rad_rel: radius (relative to half the image diagonal) at which the weight falls to 50% of max_weight
     :param offsets_rel: (x,y) offsets of the center relative to image size (0.5,0.5 = center of image)
+    :param flatness: The values above this fraction of max_weight are clipped, then everything
+    is scaled to [1.0, max_weight].  (0.0 = no clipping, 1.0 = all weights are max_weight)
     :return: weight matrix of shape (height, width)
     """
     w, h = img_size_wh
@@ -188,19 +190,25 @@ def make_central_weights(img_size_wh, max_weight=10.0, rad_rel=0.5, offsets_rel=
     sigma = rad_rel * max_rad / np.sqrt(2.0 * np.log(2.0))  # so that weight is half max_weight at rad_rel * max_rad
     weights = 1.0 + (max_weight - 1.0) * np.exp(-0.5 * (rad/sigma)**2)
     weights = weights - np.min(weights) 
-    weights = weights / np.max(weights) * (max_weight-1.0) + 1.0
+    weights = weights / np.max(weights) * (max_weight-1.0) 
+    if flatness > 0.0:
+        nonflatness = 1.0 - flatness
+        clip_val = weights.max() * nonflatness
+        print("Clipping weights above %.3f (%.1f%% of max)" % (clip_val, nonflatness*100.0))
+        weights = np.clip(weights, 1.0, clip_val)
+        weights = (weights - np.min(weights)) / (np.max(weights) - np.min(weights)) * (max_weight - 1.0) + 1.0
     return weights.astype(np.float32)   
 
 def test_make_central_weights():
     shapes = [(100, 100), (200, 140), (130, 200)]
     weight = 5.0
     rad_rels = [0.1, 0.3, 0.5, .75, .9]
-    
+    flatness = 0.5
     fig, axes = plt.subplots(len(shapes)*2, len(rad_rels), figsize=(16, 10))
     for i, shape in enumerate(shapes):
         for j, rad_rel in enumerate(rad_rels):
-            w = make_central_weights(shape, max_weight=weight, rad_rel=rad_rel)
-            
+            w = make_central_weights(shape, max_weight=weight, rad_rel=rad_rel, flatness=flatness)
+
             ax_image = axes[i*2, j]
             ax_cross_section = axes[i*2+1, j]
             

@@ -17,7 +17,7 @@ import cv2
 import time
 import os
 import logging
-from util import make_input_grid, downscale_image
+from util import make_input_grid, downscale_image, make_central_weights
 import argparse
 from threading import Thread
 from circular import CircleLayer
@@ -25,6 +25,7 @@ from linear import LineLayer
 from normal import NormalLayer
 import matplotlib.pyplot as plt
 import json
+from skimage import measure
 import matplotlib.gridspec as gridspec
 from copy import deepcopy
 
@@ -39,7 +40,8 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, learning_rate_initial=0.1, downscale=1.0, **kwargs):
+    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
+                 learning_rate_initial=0.1, downscale=1.0, center_weight_params=None, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
@@ -49,6 +51,10 @@ class ScaleInvariantImage(object):
         :param image: if not None, a HxWx3 or HxW numpy array containing the target image
         :param batch_size: training batch size
         :param sharpness: sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear
+        :param grad_sharpness: sharpness constant for gradient of activation function, e.g. f'(x) = sharpness * sech^2(x*sharpness)
+        :param learning_rate_initial: initial learning rate for Adadelta optimizer
+        :param downscale: downscale factor for training image (1.0 = full size, 0.5 = half size, etc)
+        :param center_weight_params: if not None, a dict with keys 'weight' (float) and 'sigma' (float) to weight center pixels more heavily
 
         """
         self.image_raw = image_raw
@@ -58,9 +64,10 @@ class ScaleInvariantImage(object):
         self.grad_sharpness = grad_sharpness
         self.image_train = None
         self._downscale = downscale
+        self._sample_weights = None
         self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
-
+        self._center_weight_params = center_weight_params
         self._learning_rate = learning_rate_initial
 
 
@@ -84,9 +91,6 @@ class ScaleInvariantImage(object):
         else:
             weights = None
             
-        
-
-            
         # Cache this
         self._last_downscale = None
         self._input, self._output = self._make_train(self._downscale)
@@ -106,13 +110,13 @@ class ScaleInvariantImage(object):
 
     def _make_train(self, downscale, keep_aspect=True):
         
-        print("\n\n\nMaking input with downscale:  %.3f\n\n" % (downscale,))
         if self._last_downscale is not None and self._last_downscale == downscale:
             return self._input, self._output
         self._last_downscale = downscale
 
         self._downscale_level = downscale
         self.image_train = downscale_image(self.image_raw, self._downscale_level)
+        
 
         in_x, in_y = make_input_grid(self.image_train.shape, keep_aspect=keep_aspect)
 
@@ -120,6 +124,20 @@ class ScaleInvariantImage(object):
         input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
         r, g, b = cv2.split(self.image_train / 255.0)
         output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
+        
+        if self._center_weight_params is not None:
+            train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
+            self._weight_grid = make_central_weights(train_img_size_wh, max_weight=self._center_weight_params['weight'],
+                                                       rad_rel=self._center_weight_params['sigma'],
+                                                       offsets_rel=self._center_weight_params['xy_offsets_rel'])
+            logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
+                         (self._center_weight_params['weight'], self._center_weight_params['sigma'], train_img_size_wh))
+            self._sample_weights = self._weight_grid.reshape(-1)
+            self.weight_cross_sections = {'x': self._weight_grid[self._weight_grid.shape[0]//2,:],
+                                          'y': self._weight_grid[:,self._weight_grid.shape[1]//2]}
+        else:
+            logging.info("Not using weighted samples.")
+            self._sample_weights = None
         logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f], %i samples total." %
                      (grid_shape, input[:, 0].min(), input[:, 0].max(), input[:, 1].min(), input[:, 1].max(), input.shape[0]))
         self._input, self._output = input, output
@@ -177,13 +195,16 @@ class ScaleInvariantImage(object):
 
         # Save numpy training set:
         # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
-        # print("SAVED Numpy TEST data to file: training_data.npz")
 
         rand = np.random.permutation(input.shape[0])
         input = input[rand]
         output = output[rand]
+        # Apply the same permutation to sample weights to keep them aligned with input/output
+        sample_weights = self._sample_weights[rand] if self._sample_weights is not None else None
         batch_losses = BatchLossCallback()
-        self._model.fit(input, output, epochs=epochs,
+        swt = ", sample weight range [%.6f, %.6f]" % (np.min(sample_weights), np.max(sample_weights)) if sample_weights is not None else ""
+        logging.info("... More training with %i epochs%s" % (epochs, swt))
+        self._model.fit(input, output, epochs=epochs, sample_weight=sample_weights,
                         batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
         # Get loss for each step
         batch_history = batch_losses.batch_losses
@@ -276,13 +297,14 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,
+    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_div = n_div
         self.n_hidden = n_hidden
+        self._center_weight_params = center_weight_params
         self._update_plots = False
         self._run_cycles = run_cycles
         self._shutdown = False
@@ -323,8 +345,9 @@ class UIDisplay(object):
         # model/image file prefix is the image bare name without extension
         self._file_prefix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
 
-        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate_initial=self._learn_rate,batch_size=self._batch_size,
-                                        state_file=state_file, image_raw=self._image_raw, downscale=self._downscale, **kwargs)
+        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate_initial=self._learn_rate,
+                                        batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, 
+                                        downscale=self._downscale, center_weight_params=self._center_weight_params, **kwargs)
 
         # Check for metadata file
         if state_file is not None:
@@ -530,6 +553,10 @@ class UIDisplay(object):
             self._show_all_hist = not self._show_all_hist
             logging.info("Toggled loss history display mode:  %s" % ("all cycles" if self._show_all_hist else "last 5 cycles only",))   
             self._update_plots = True
+        elif event.key == 'w':
+            self._show_weight_contours = not self._show_weight_contours
+            logging.info("Toggled weight contour display:  %s" % ("on" if self._show_weight_contours else "off",))   
+            self._update_plots = True
         else:
             logging.info("Unassigned key: %s" % (event.key,))
 
@@ -568,22 +595,50 @@ class UIDisplay(object):
         fig = plt.figure(figsize=(12,8))
 
         if self._image_raw.shape[0] > self._image_raw.shape[1]:
-            grid = gridspec.GridSpec(2, 3, height_ratios=[1,2], width_ratios=[1,1,.7])
+            # tall images, side-by side, plots on the right
+            
+            #
+            #   +------+ +------+ +--+
+            #   |train | |output| |p1|
+            #   |      | |      | +--+
+            #   |      | |      | +--+
+            #   |      | |      | |  |
+            #   |      | |      | |p2|
+            #   |      | |      | |  |
+            #   +------+ +------+ +--+
+            
+            grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,.7])
             logging.info("Tall images, orienting side-by-side.")
-
-            # tall images, side-by side
             train_ax = fig.add_subplot(grid[:, 0])
             out_ax = fig.add_subplot(grid[:, 1])
-            lrate_ax = fig.add_subplot(grid[0, 2])
-            loss_ax = fig.add_subplot(grid[1, 2],sharex=lrate_ax)
         else:
-            logging.info("Wide images, orienting vertically.")
-
+            # wide images, stacked vertically, plots on the right
+            #
+            #   +-------------+ +--+
+            #   | TRAIN       | |p1|
+            #   |             | +--+
+            #   +-------------+ +--+ 
+            #   +-------------+ |  |
+            #   |             | |p2|
+            #   | Output      | |  |
+            #   +-------------+ +--+
+            logging.info("--------------------------Wide images, orienting vertically.")
             grid = gridspec.GridSpec(8, 2, width_ratios=[2,.7])
             train_ax = fig.add_subplot(grid[:4, 0])
             out_ax = fig.add_subplot(grid[4:, 0])
-            lrate_ax = fig.add_subplot(grid[:3, 1])
-            loss_ax = fig.add_subplot(grid[3:, 1],sharex=lrate_ax)
+        
+        if self._center_weight_params is not None:            
+            lrate_ax = fig.add_subplot(grid[:3, -1])
+            loss_ax = fig.add_subplot(grid[3:6, -1],sharex=lrate_ax)
+            weight_ax = fig.add_subplot(grid[6:, -1])
+            weights_plotted=False
+        else:
+            lrate_ax = fig.add_subplot(grid[:3, -1])
+            loss_ax = fig.add_subplot(grid[3:, -1],sharex=lrate_ax)
+            weight_ax = None
+            weights_plotted=True
+            
+                
 
 
         lrate_ax.grid(which='major', axis='both')
@@ -604,91 +659,127 @@ class UIDisplay(object):
 
         artists = {'loss': None, 'train_img': None, 'out_img': None}
         self._update_plots = False # set when user changes something that requires a plot update
-
+        self._show_weight_contours = True
         # start main UI loop (training is in the thread):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
         
         while not self._shutdown and (self._worker is None or self._worker.is_alive()):
-            try:
-                if artists['train_img'] is None:
-                    artists['train_img'] = train_ax.imshow(self._sim.image_train)
+            # try:
+            if artists['train_img'] is None or self._update_plots:
+                # mask out pixels with zero weight in self._sim._weight_grid
+                img_out = self._sim.image_train.copy()
+                if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
+                    # apply contour lines at 20% intervals
+                    n_cot = 10
+                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(0.0, self._center_weight_params['weight'], n_cont, endpoint=True)[1:]]
+                    colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
+                    for level_ind, contours in enumerate(contour_levels):
+                        for contour in contours:
+                            contour = np.round(contour).astype(int)
+                            img_out[contour[:, 0], contour[:, 1], :] = colors[level_ind]
+                    logging.info("Overlayed weight contours on training image.")
+
+                artists['train_img'] = train_ax.imshow(img_out)
+            # else:  # FUTURE: replace if training image changes
+            #     artists['train_img'].set_data(self._sim.image_train)
+            cmd =( "\n('w' to hide weight contours)" if self._show_weight_contours else "\n('w' to show weight contours)")\
+                if self._center_weight_params is not None else ""
+            train_ax.set_title("Training cycle %i/%s...\ntarget image %i x %i%s" %
+                (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
+                    self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
+
+            if not weights_plotted:
+                if self._center_weight_params is not None and self._sim.weight_cross_sections is not None and weight_ax is not None:
+                    weight_ax.cla()
+                    weight_ax.plot(self._sim.weight_cross_sections['x'], 'r-')
+                    #weight_ax.plot(self._sim.weight_cross_sections['y'], 'b-', label='Y cross-section')
+                    weight_ax.set_title("Sample Weights Cross-Sections")
+                    #weight_ax.set_ylabel("Relative Weight")
+                    #weight_ax.set_xlabel("Pixel Index")
+                    #weight_ax.legend()
+                    # turn off x axis labels, tickes
+                    weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
+                                            left=True, right=False, bottom=False, top=False)
+                    weight_ax.set_ylim(0.0, self._center_weight_params['weight'] * 1.1)
+                    # add grid
+                    weight_ax.grid(which='both', axis='y')
+                    weights_plotted=True
+
+            if self._output_image is not None:
+                # Can take a while to generate the first image
+                out_ax.set_title("Cycle %i loss: %.5f\nOutput Image %s" % (self._cycle, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
+
+                if artists['out_img'] is None:
+                    artists['out_img'] = out_ax.imshow(self._output_image)
+                    out_ax.axis("off")
                 else:
-                    artists['train_img'].set_data(self._sim.image_train)
-                train_ax.set_title("\nTraining cycle %i/%s...\ntarget image %i x %i" %
-                    (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
-                     self._sim.image_train.shape[1], self._sim.image_train.shape[0]))
+                    artists['out_img'].set_data(self._output_image)
+                    out_ax.axis("off")
+                    out_ax.set_aspect('equal')
 
-                if self._output_image is not None:
-                    # Can take a while to generate the first image
-                    out_ax.set_title("loss: %.5f\nOutput Image %s\n" % (self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
-
-                    if artists['out_img'] is None:
-                        artists['out_img'] = out_ax.imshow(self._output_image)
-                        out_ax.axis("off")
-                    else:
-                        artists['out_img'].set_data(self._output_image)
-                        out_ax.axis("off")
-                        out_ax.set_aspect('equal')
-
-                if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
-                    """
-                    Plot the individual minibatch losses, and their mean per cycle on top.   
-                    """
-
-                    graph_update_cycle = self._cycle
-                    all_losses = np.hstack(self._loss_history)
-                    loss_sizes = [np.array(lh).size for lh in self._loss_history]
-                    cycle_x = np.hstack([np.linspace(c, c+1.0, size, endpoint=False) for c, size in zip(range(len(loss_sizes)), loss_sizes)])
-                    total_xy = np.array((cycle_x, all_losses)).T
-                    if artists['loss'] is None:
-                        artists['loss'] = loss_ax.plot(total_xy[:, 0], total_xy[:, 1], 'b.', label='Loss per step')[0]
-                        loss_ax.set_yscale('log')
-                    else:
-                        artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
-                    first_ind = 0 if self._show_all_hist else all_losses.size- np.sum(loss_sizes[-max_hist_cycles:])
-                    smallest, biggest = all_losses[first_ind:].min(), all_losses[first_ind:].max()
-                    
-                    loss_ax.set_ylim(smallest * 0.9, biggest * 1.1)
-
-                    # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
-                    # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
-                    lrate_y = np.repeat(np.array(self._l_rate_history), 2)
-                    lrate_x0 = np.array(range(len(self._l_rate_history)))
-                    lrate_x = np.zeros(lrate_y.size)
-                    lrate_x[0::2] = lrate_x0
-                    lrate_x[1::2] = lrate_x0 + 1.0
-                    if artists.get('lrate') is None:
-                        artists['lrate'] = lrate_ax.plot(lrate_x, lrate_y, 'r-', label='Learning Rate')[0]
-                        lrate_ax.set_yscale('log')
-
-                    else:
-                        artists['lrate'].set_data(lrate_x, lrate_y)
-                    first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
-                    lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
-                    
-                    # set shared x limit
-                    if  self._show_all_hist:
-                        x_max = self._cycle + (self._cycle+1)/20 
-                        x_min = -(self._cycle+1)/20
-                    else:
-                        x_max = self._cycle + .1
-                        x_min = max(0, self._cycle - max_hist_cycles) - .1
-                    lrate_ax.set_xlim(x_min, x_max)
-
-                fig.tight_layout()
-                plt.draw()
-                fig.canvas.flush_events()  # Force canvas to update
-                plt.pause(0.2)
+            if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
+                """
+                Plot the individual minibatch losses, and their mean per cycle on top.   
+                """
+                if len(self._loss_history) ==0 or len(self._l_rate_history) == 0:
+                    self._update_plots = False
+                    continue
+                graph_update_cycle = self._cycle
+                all_losses = np.hstack(self._loss_history)
+                loss_sizes = [np.array(lh).size for lh in self._loss_history]
+                cycle_x = np.hstack([np.linspace(c, c+1.0, size, endpoint=False) for c, size in zip(range(len(loss_sizes)), loss_sizes)])
+                total_xy = np.array((cycle_x, all_losses)).T
+                if artists['loss'] is None:
+                    artists['loss'] = loss_ax.plot(total_xy[:, 0], total_xy[:, 1], 'b.', label='Loss per step')[0]
+                    loss_ax.set_yscale('log')
+                else:
+                    artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
+                first_ind = 0 if self._show_all_hist else all_losses.size- np.sum(loss_sizes[-max_hist_cycles:])
+                smallest, biggest = all_losses[first_ind:].min(), all_losses[first_ind:].max()
                 
-            except Exception as e:
-                logging.error(f"Error updating GUI: {e}")
-                plt.pause(0.1)  # Longer pause on error
+                loss_ax.set_ylim(smallest * 0.9, biggest * 1.1)
+
+                # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
+                # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
+                lrate_y = np.repeat(np.array(self._l_rate_history), 2)
+                lrate_x0 = np.array(range(len(self._l_rate_history)))
+                lrate_x = np.zeros(lrate_y.size)
+                lrate_x[0::2] = lrate_x0
+                lrate_x[1::2] = lrate_x0 + 1.0
+                if artists.get('lrate') is None:
+                    artists['lrate'] = lrate_ax.plot(lrate_x, lrate_y, 'r-', label='Learning Rate')[0]
+                    lrate_ax.set_yscale('log')
+
+                else:
+                    artists['lrate'].set_data(lrate_x, lrate_y)
+                first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
+                lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
+                
+                # set shared x limit
+                if  self._show_all_hist:
+                    x_max = self._cycle + (self._cycle+1)/20 
+                    x_min = -(self._cycle+1)/20
+                else:
+                    x_max = self._cycle + .1
+                    x_min = max(0, self._cycle - max_hist_cycles) - .1
+                lrate_ax.set_xlim(x_min, x_max)
+                
+            self._update_plots = False
+
+            fig.tight_layout()
+            plt.draw()
+            fig.canvas.flush_events()  # Force canvas to update
+            plt.pause(0.2)
+                
+            # except Exception as e:
+            #     logging.error(f"Error updating GUI: {e}")
+            #     plt.pause(0.1)  # Longer pause on error
 
             if self._shutdown:
                 break
         
         # Clean up after training is done
-        if self._worker.is_alive():
+        if self._worker is not None and self._worker.is_alive():
             self._worker.join(timeout=5.0)
         plt.ioff()
         plt.show()  # Keep the final plot visible
@@ -726,12 +817,16 @@ def get_args():
                         " and they don't settle.", type=float, default=5.0)
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
+    parser.add_argument("-w", "--weigh_center", help="Weigh pixels nearer the center higher during training by this radius / factor and x, y offsets.",nargs=4, type=float, default=[1.0, 2.0])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parsed = parser.parse_args()
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
-
-    kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult,
+    center_weight = {'weight': parsed.weigh_center[0], 
+                     "xy_offsets_rel": (parsed.weigh_center[2], parsed.weigh_center[3]),
+                     'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
+    
+    kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles,
@@ -745,6 +840,5 @@ if __name__ == "__main__":
 
     if parsed.input_image is None and parsed.model_file is None:
         raise Exception("Need input image (-i) to start training, or model file (-m) to continue.")
-
     s = UIDisplay(image_file=parsed.input_image, state_file=parsed.model_file, **kwargs)
     s.run()

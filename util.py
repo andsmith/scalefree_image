@@ -235,12 +235,174 @@ def test_captioned_frame():
     cv2.imshow("Test Captioned Frame", frame)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+    
+def interpolate_weights(locs, grid, shape):
+    """
+    Interpolate weights defined on a grid to arbitrary locations using bilinear interpolation
+    :param locs: Nx2 array of (x,y) locations in [0,1]x[0,1]
+    :param grid: HxW array of weights defined on a regular grid
+    :param shape: (width, height) of the image that locs correspond to
+    :return: N array of interpolated weights
+    """
+    h, w = grid.shape
+    img_w, img_h = shape
+    xs = locs[:, 0] * (img_w - 1)
+    ys = locs[:, 1] * (img_h - 1)
 
+    # map image coordinates to grid coordinates
+    grid_xs = xs / (img_w - 1) * (w - 1)
+    grid_ys = ys / (img_h - 1) * (h - 1)
+
+    x0 = np.floor(grid_xs).astype(int)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    y0 = np.floor(grid_ys).astype(int)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+
+    x0 = np.clip(x0, 0, w - 1)
+    y0 = np.clip(y0, 0, h - 1)
+
+    wa = (x1 - grid_xs) * (y1 - grid_ys)
+    wb = (grid_xs - x0) * (y1 - grid_ys)
+    wc = (x1 - grid_xs) * (grid_ys - y0)
+    wd = (grid_xs - x0) * (grid_ys - y0)
+
+    weights = wa * grid[y0, x0] + wb * grid[y0, x1] + wc * grid[y1, x0] + wd * grid[y1, x1]
+    return weights
+
+def test_interpolate_weights():
+    grid = make_central_weights((10, 10), max_weight=5.0, rad_rel=0.5, flatness=0.2)
+    shape = (200, 200)
+    x, y = make_input_grid((shape[1], shape[0]), resolution=1.0, border=0.0, keep_aspect=True)
+    locs = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
+    locs = (locs + 1.0) / 2.0  # map from [-1,1] to [0,1]
+    weights = interpolate_weights(locs, grid, shape)
+
+    weights_img = weights.reshape((shape[1], shape[0]))
+    cv2.imshow("Interpolated Weights", weights_img / np.max(weights_img))
+    cv2.waitKey(0)
+    cv2.destroyAllWindows() 
+
+def calc_grid_size(n_units, aspect_ratio=1.0):
+    """
+    Calculate a good grid size (rows, cols) for n_units with the given aspect ratio (width/height)
+    :param n_units: number of units to arrange in a grid
+    :param aspect_ratio: desired aspect ratio (width/height) of the grid
+    :return: (rows, cols)
+    """
+    cols = int(np.ceil(np.sqrt(n_units * aspect_ratio)))
+    rows = int(np.ceil(n_units / cols))
+    return rows, cols
+
+def test_calc_grid_size():
+    test_cases = [
+        (10, 1.0),
+        (20, 1.0),
+        (50, 1.0),
+        (100, 1.0),
+        (10, 2.0),
+        (20, 2.0),
+        (50, 2.0),
+        (100, 2.0),
+        (10, 0.5),
+        (20, 0.5),
+        (50, 0.5),
+        (100, 0.5),
+    ]
+    for n_units, aspect_ratio in test_cases:
+        rows, cols = calc_grid_size(n_units, aspect_ratio)
+        print(f"n_units={n_units} =?= {rows * cols}, aspect_ratio={aspect_ratio:.2f} => rows={rows}, cols={cols}, aspect diff={aspect_ratio - cols/rows:.2f}")
+        assert rows * cols >= n_units
+
+
+def sample_image(image, n_samples,weights=None):
+    """
+    Don't just sample uniformly, over a grid of points with approx n_samples (keeping aspect ratio), and 
+    with noise added so each point can be anywhere within it's grid cell
+    :param image: HxWx3 BGR image
+    :param n_samples: approximate number of samples to take
+    :param weights: optional array of weights to sample at the same coordinates (must match image size)
+    """
+    aspect = image.shape[1] / image.shape[0]
+    rows, cols = calc_grid_size(n_samples, aspect)
+    
+    
+    x, y = np.meshgrid(np.linspace(0,image.shape[1], cols, dtype=int, endpoint=False) ,
+                       np.linspace(0,image.shape[0], rows, dtype=int, endpoint=False)) 
+    x_scatter = image.shape[1] / cols
+    y_scatter = image.shape[0] / rows
+    
+    x += np.random.randint(0, x_scatter, size=x.shape)
+    y += np.random.randint(0, y_scatter, size=y.shape)
+    red_outputs = image[y, x, 0] / 255.0
+    green_outputs = image[y, x, 1] / 255.0
+    blue_outputs = image[y, x, 2] / 255.0
+
+    
+    # Now compute input coordinates
+    
+    if aspect > 1.0:
+        # wide image, shrink y, x is in [-1, 1]
+        x_span = -1.0, 1.0
+        y_span = -1.0/aspect, 1.0/aspect
+    else:
+        # tall image, shrink x, y is in [-1, 1]
+        x_span = -aspect, aspect
+        y_span = -1.0, 1.0
+        
+    input_x =  x / (image.shape[1]-1) * (x_span[1] - x_span[0]) + x_span[0]
+    input_y =  y / (image.shape[0]-1) * (y_span[1] - y_span[0]) + y_span[0]
+
+
+    input = np.hstack((input_x.reshape(-1,1), input_y.reshape(-1,1)))
+    output = np.hstack((red_outputs.reshape(-1,1), green_outputs.reshape(-1,1), blue_outputs.reshape(-1,1)))
+    if weights is not None:
+        weights = weights[y, x].reshape(-1,1)
+    else:
+        weights = None
+    print("Input shape:", input.shape, "Output shape:", output.shape)
+    return input, output, weights
+
+def make_test_image(box_size = 10, n_boxes = 10):
+    # Vertical si red fading to black, horizontal is green fading to black
+    # diagonal is blue fading to black
+    c_val = np.array([i for i in np.linspace(0, 255, n_boxes).astype(np.uint8)])
+    c_val = np.repeat(c_val, box_size)
+    red = np.tile(c_val, (box_size*n_boxes,1))
+    green = np.tile(c_val[::-1].reshape(-1,1), (1,box_size*n_boxes))
+    blue =0 * red
+    for i in range(n_boxes):
+        for j in range(n_boxes):
+            color = int(((i+j)/18.0)*255)
+            blue[i*box_size:(i+1)*box_size, j*box_size:(j+1)*box_size] = color
+
+    image = np.dstack((red, green, blue))
+    return image
+
+
+def test_sample_image():
+    image = make_test_image(n_boxes=3,box_size = 300)
+    # test image is 10x10 colored boxes
+    inputs, outputs = [], []
+    for _ in range(10):
+        input_xy, output_rgb = sample_image(image, 150)
+        inputs.append(input_xy)
+        outputs.append(output_rgb)
+    in_x = np.array(inputs).reshape(-1,2)
+    in_y = np.array(outputs).reshape(-1,3)  
+    for input_xy, output_rgb in zip(inputs, outputs):
+        plt.scatter(in_x[:,0], in_x[:,1], c=in_y, s=15)
+    plt.axis('equal')
+    plt.title("Colors should be all linearly separable.")
+    plt.show()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     #test_captioned_frame()
     # test_add_text()
     # test_make_input_grid()
-    test_make_central_weights()
+    #test_make_central_weights()
+    test_interpolate_weights()
+    # test_calc_grid_size()
+    #test_sample_image()
+    
     logging.info("All tests passed.")

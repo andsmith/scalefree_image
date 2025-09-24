@@ -164,7 +164,7 @@ test_data_barn_meta = {'frame_rate': 10,
                                         {'txt': 'loss: %.7f', 'meta_keys': ['loss']}]}
                        ]
                        }
-still_life = {'frame_rate': 10,
+still_life = {'frame_rate': 30,
               'caption_height_px': 80,  # shrink/grow if if you need more/fewer lines of text
               'title_pause_sec': 5.0,
               'episode_initial_pause_sec': 2.0,
@@ -172,24 +172,46 @@ still_life = {'frame_rate': 10,
               'txt_color': COLORS['text'],
               'bkg_color': COLORS['bkg'],
               'title_pad_px': 30,
-              'caption_pad_xy': (10, 5),
+              'caption_pad_xy': (2, 1),
               'max_frame_cap_font_scale': 1.2,
               'title': {'main': ('Optimal image approximation using',
                                  ' 50 circle units + 100 line units,',
                                  ' 50 color units.'),
-                        'sub1': ('Image by: Clara Peeters, ca. 1610,',),
-                        'sub2': ('Code by:  Andrew T. Smith, 2025',
+                        'sub1': ('Image by: Clara Peeters, ca. 1610.',),
+                        'sub2': ('Code by:  Andrew T. Smith, 2025.',
                                  'github: andsmith/scalefree_image',),
                         'spacing_frac': 0.2,
                         'max_font_scales': (None, 1.2, None)
                         },
               'train_img': {'file': 'still_life_train_50c-100l_32h_downscale=4.0.png',
                             'caption': ['input data: %d x %d'],
-                            'duration_sec': 5.0},
+                            'duration_sec': 5.0,
+                                'inter-episode_pause_sec': 3.0},
               'episodes': [
                   {'json_meta': r'still_life_metadata_50c-100l_32h.json',
                    'caption': [{'txt': 'cycle (50 epochs): %d, learning rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
                                {'txt': 'output %i x %i, loss: %.7f', 'meta_keys': ['train_width', 'train_height', 'loss']}]}
+              ]
+              }
+author = {'frame_rate': 60,
+              'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
+              'title_pause_sec': 0.0,
+              'episode_initial_pause_sec': 2.0,
+              'episode_final_pause_sec': 10.0,
+              'txt_color': COLORS['text'],
+              'bkg_color': COLORS['bkg'],
+              'title_pad_px': 30,
+              'caption_pad_xy': (10, 5),
+              'max_frame_cap_font_scale': 1.2,
+              'title':None,
+              'train_img': {'file': 'author_train_256l_32h_downscale=6.0.png',
+                            'caption': ['input data: %d x %d'],
+                            'duration_sec': 5.0,
+                                'inter-episode_pause_sec': 3.0},
+              'episodes': [
+                  {'json_meta': r'author_metadata_256l_32h.json',
+                   'caption': [{'txt': 'frame: %d, L-rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
+                               {'txt': 'loss: %.7f', 'meta_keys': [ 'loss']}]}
               ]
               }
 
@@ -208,6 +230,9 @@ class MovieMaker(object):
         self.caption_height_px = self.movie_data['caption_height_px']
         self.episode_data = self.movie_data['episodes']
         self.title_txt = self.movie_data['title']
+        if self.title_txt is not None:
+            self._title_spacing_frac = self.movie_data['title']['spacing_frac']
+            self._max_title_font_scales = self.movie_data['title'].get('max_font_scales', (None, None, None))
         self.title_pad_px = self.movie_data['title_pad_px']
         self.caption_pad_xy = self.movie_data['caption_pad_xy']
         self.initial_pause_sec = self.movie_data['episode_initial_pause_sec']
@@ -215,8 +240,6 @@ class MovieMaker(object):
         self.title_dur_sec = self.movie_data['title_pause_sec']
         self.txt_color = tuple(self.movie_data['txt_color'])
         self.bkg_color = tuple(self.movie_data['bkg_color'])
-        self._title_spacing_frac = self.movie_data['title']['spacing_frac']
-        self._max_title_font_scales = self.movie_data['title'].get('max_font_scales', (None, None, None))
         self._max_frame_cap_font_scale = self.movie_data.get('max_frame_cap_font_scale', 1.0)
         # self.episodes = self._load()
 
@@ -318,6 +341,9 @@ class MovieMaker(object):
         max_delay = 1.0 / self.frame_rate
         sleep_times = []
         user_quit = False
+        win_name = 'preview'
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+        win_size = None
         for i, frame in enumerate(frames):
             now = time.perf_counter()
             delay = now - last_time
@@ -327,7 +353,16 @@ class MovieMaker(object):
 
             if sleep_time > 0:
                 time.sleep(sleep_time)
-            cv2.imshow('preview', frame)
+
+            if win_size is None:
+                targ_frame_size = 800
+                mul = targ_frame_size / max(frame.shape[0], frame.shape[1])
+                win_size = (int(frame.shape[1]*mul), int(frame.shape[0]*mul))
+                cv2.resizeWindow(win_name, win_size[0], win_size[1])
+
+
+
+            cv2.imshow(win_name, frame)
             n_frames += 1
             last_time = time.perf_counter()
 
@@ -417,7 +452,7 @@ class MovieMaker(object):
             frame_captions = [self._make_frame_caption(m, episode['caption']) for m in meta]
 
         frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy, justify='left', max_font_scale=self._max_frame_cap_font_scale,
-                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.5) for f, c in zip(frames, frame_captions)]
+                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.0) for f, c in zip(frames, frame_captions)]
 
         intro_frames = self._mk_seq(frames[0], self.initial_pause_sec)
         outro_frames = self._mk_seq(frames[-1], self.final_pause_sec)
@@ -430,21 +465,29 @@ class MovieMaker(object):
         frame_size_wh = episode_sequences[0][0].shape[:2][::-1]
         img_size = (frame_size_wh[0], frame_size_wh[1]-self.caption_height_px)
         logging.info("Got image/frame size from first episode's first frame:  %s / %s" % (img_size, frame_size_wh))
-        title_frame = self.make_title_frame(frame_size_wh,  # include caption area
-                                            spacing_frac=self._title_spacing_frac,
-                                            max_font_scales=self._max_title_font_scales)
 
-        frames = self._mk_seq(title_frame, self.title_dur_sec,)
+        frames = []
+
+        #  Add title if it exists
+        if self.title_txt is not None:
+            title_frame = self.make_title_frame(frame_size_wh,  # include caption area
+                                                spacing_frac=self._title_spacing_frac,
+                                                max_font_scales=self._max_title_font_scales)  
+
+            frames += self._mk_seq(title_frame, self.title_dur_sec,)
+
+        # Add training image if it exists, create a short version for after/between episodes
         short_train_seq = []
         if self.train_img is not None:
             train_frame = self.make_train_frame(img_size)
             train_seq = self._mk_seq(train_frame, self.movie_data['train_img']['duration_sec'])
             short_train_seq = self._mk_seq(
                 train_frame,  self.movie_data['train_img'].get('inter-episode_pause_sec', 2.0))
-
             frames += train_seq
+            logging.info("Added training image sequence of %d frames." % (len(train_seq),))
+        # Now add each episode sequence, with a short training image pause between
         for seq_no, seq in enumerate(episode_sequences):
-            frames += seq + (short_train_seq if (seq_no < len(episode_sequences)-1) else [])
+            frames += seq + short_train_seq  # (short_train_seq if (seq_no < len(episode_sequences)-1) else [])
         return frames
 
     def _mk_seq(self, frame, dur_sec):

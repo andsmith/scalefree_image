@@ -32,9 +32,13 @@ import json
 from tempfile import tempdir
 from util import add_text, captioned_frame
 import cv2
+import tempfile
+import shutil
 import glob
 import re
 import numpy as np
+
+
 COLORS = {'text': (51, 4, 0),
           'bkg': (227, 238, 246)}  # BGR
 
@@ -215,6 +219,28 @@ author = {'frame_rate': 60,
               ]
               }
 
+episode_template = {'frame_rate': 20,
+              'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
+              'episode_initial_pause_sec': 2.0,
+              'episode_final_pause_sec': 10.0,
+              'txt_color': COLORS['text'],
+              'bkg_color': COLORS['bkg'],
+              'title_pad_px': None,
+              'title_pause_sec': None,
+              'caption_pad_xy': (10, 5),
+              'max_frame_cap_font_scale': 1.2,
+              'title':None,
+              'train_img': {'file': None,  # will be tempfile from image saved in metadata
+                            'caption': ['input data: %d x %d'],
+                            'duration_sec': 3.0,
+                                'inter-episode_pause_sec': 3.0},
+              'episodes': [
+                  {'json_meta': None, # will be command line argument
+                   'caption': [{'txt': 'frame: %d, L-rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
+                               {'txt': 'loss: %.7f', 'meta_keys': [ 'loss']}]}
+              ]
+              }
+
 
 class MovieMaker(object):
     def __init__(self, movie_data, output_file, preview=False):
@@ -355,10 +381,11 @@ class MovieMaker(object):
                 time.sleep(sleep_time)
 
             if win_size is None:
-                targ_frame_size = 800
-                mul = targ_frame_size / max(frame.shape[0], frame.shape[1])
-                win_size = (int(frame.shape[1]*mul), int(frame.shape[0]*mul))
-                cv2.resizeWindow(win_name, win_size[0], win_size[1])
+                targ_frame_size = 975
+                if frame.shape[0] >  targ_frame_size:
+                    mul = targ_frame_size / max(frame.shape[0], frame.shape[1])
+                    win_size = (int(frame.shape[1]*mul), int(frame.shape[0]*mul))
+                    cv2.resizeWindow(win_name, win_size[0], win_size[1])
 
 
 
@@ -397,7 +424,7 @@ class MovieMaker(object):
         elif 'json_meta' in episode:
             with open(episode['json_meta'], 'r') as f:
                 meta = json.load(f)
-            meta = self._sort_metadata(meta)
+            meta = self._sort_metadata(meta['frames'] if 'frames' in meta else meta)  # for backward compatibility
             files = [m['filename'] for m in meta if 'filename' in m]
             logging.info("Metadata file:  %s, loaded %d frame entries." % (episode['json_meta'], len(meta)))
             if not files:
@@ -623,10 +650,46 @@ def get_args():
     parser.add_argument('-o', '--output_file', type=str,
                         help="Output movie file, e.g. movie.mp4, if not provided will just generate a title card.", default=None)
     parser.add_argument('-p', '--play', action='store_true', help="Play the movie, don't create it.", default=False)
+    parser.add_argument('-r', '--move_from_metadata', type=str, 
+                        help="Don't use a movie description structure, just play/encode a single metadata file's frames as an episode.", default=None)
     parser.add_argument('-j', '--write_json', type=str,
                         help="Don't make/play a movie, just write the JSON to this file (useful with no -m argument, generate a template.)", default=None)
 
     return parser.parse_args()
+
+def _make_single_episode_data(meta_file):
+    """
+    Make a movie data structure with a single episode from the given metadata file.
+       * use the metadata file itself for the episode frames
+       * Get the training immage location from the metadata file, use it for the training image
+       * use the episode_template as the base structure
+    """
+    if not os.path.isfile(meta_file):
+        raise ValueError(f"Metadata file does not exist:  {meta_file}")
+    movie_data = deepcopy(episode_template)
+    with open(meta_file, 'r') as f:
+        meta = json.load(f)
+
+    if 'train_image_file' not in meta:
+        movie_data['train_img'] = None
+    else:
+        movie_data['train_img']['file'] = meta['train_image_file']
+        img = cv2.imread(meta['train_image_file'])
+        movie_data['train_img']['caption'] = ['training image (%d x %d)'%  (img.shape[1], img.shape[0])]
+
+        # train_img_file = meta['train_img']['file']
+    
+
+    movie_data['episodes'][0]['json_meta'] = meta_file
+    if 'caption' in meta and isinstance(meta['caption'], list):
+        movie_data['episodes'][0]['caption'] = meta['caption']
+
+    # Remove any title, we don't need it for a single episode
+    movie_data['title'] = None
+    movie_data['title_pad_px'] = None
+    movie_data['title_pause_sec'] = None
+
+    return movie_data   
 
 
 if __name__ == "__main__":
@@ -635,10 +698,12 @@ if __name__ == "__main__":
 
     # load data
     if args.movie_json is None:
-
-        movie_data = deepcopy(still_life)
-        logging.info("No movie json file provided, using built-in test data, has %i episodes." %
-                     (len(movie_data['episodes']),))
+        if args.move_from_metadata is not None:
+            movie_data = _make_single_episode_data(args.move_from_metadata)
+        else:
+            movie_data = deepcopy(still_life)
+            logging.info("No movie json file provided, using built-in test data, has %i episodes." %
+                        (len(movie_data['episodes']),))
     else:
         with open(args.movie_json, 'r') as f:
             movie_data = json.load(f)
@@ -656,14 +721,16 @@ if __name__ == "__main__":
 
         # Just make a title card
         # Use 800x600 as a reasonable default size
-        title_frame = movie_maker.make_title_frame((800, 600),
-                                                   movie_data['title']['spacing_frac'],
-                                                   max_font_scales=movie_data['title']['max_font_scales'])
-        train_frame = movie_maker.make_train_frame((800, 600))
-        cv2.imwrite('example_title.png', title_frame[:, :, ::-1])
-        logging.info("No output mp4 file provided, wrote title frame to: example_title.png")
-        cv2.imwrite('example_train.png', train_frame[:, :, ::-1])
-        logging.info("Wrote training image frame to: example_train.png")
+        if movie_data['title'] is not None:
+            title_frame = movie_maker.make_title_frame((800, 600),
+                                                    movie_data['title']['spacing_frac'],
+                                                    max_font_scales=movie_data['title']['max_font_scales'])
+            cv2.imwrite('example_title.png', title_frame[:, :, ::-1])
+            logging.info("No output mp4 file provided, wrote title frame to: example_title.png")
+        if movie_data['train_img'] is not None:
+            train_frame = movie_maker.make_train_frame((800, 600))
+            cv2.imwrite('example_train.png', train_frame[:, :, ::-1])
+            logging.info("Wrote training image frame to: example_train.png")
         sys.exit(0)
 
     if args.play:

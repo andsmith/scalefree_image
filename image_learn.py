@@ -63,17 +63,14 @@ class ScaleInvariantImage(object):
 
         self._learning_rate = learning_rate_initial
 
-        # Cache this
-        self._last_downscale = None
-        self._input, self._output = self._make_train(self._downscale)
 
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
             # (so they can be None in the args)
             state = ScaleInvariantImage._load_state(state_file)
             weights = state['weights']
-            self.cycle, self.image_raw, self.n_hidden, self.n_div,  self.sharpness, self.grad_sharpness = \
-                state['cycle'], state['image_raw'], state['n_hidden'], state['n_div'], state['sharpness'], state['grad_sharpness']
+            self.cycle, self.image_raw, self.n_hidden, self.n_div,  self.sharpness, self.grad_sharpness, self._downscale = \
+                state['cycle'], state['image_raw'], state['n_hidden'], state['n_div'], state['sharpness'], state['grad_sharpness'], state['downscale']
             # Checks
             if image_raw is not None and image_raw.shape != self.image_raw.shape:
                 logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
@@ -81,6 +78,12 @@ class ScaleInvariantImage(object):
                 self.image_raw = image_raw
         else:
             weights = None
+
+            
+        # Cache this
+        self._last_downscale = None
+        self._input, self._output = self._make_train(self._downscale)
+
 
         self._model = self._init_model()
         if weights is not None:
@@ -209,6 +212,7 @@ class ScaleInvariantImage(object):
         data = {'weights': weights,
                 'image_raw': self.image_raw,
                 'cycle': self.cycle,
+                'downscale': self._downscale,
                 'n_div': self.n_div,
                 'n_hidden': self.n_hidden,
                 'sharpness': self.sharpness,
@@ -375,7 +379,7 @@ class UIDisplay(object):
         cv2.imwrite(file_path, train_img[:, :, ::-1])
         logging.info("Wrote training image:  %s" % (file_path,))
 
-    def _train_thread(self):
+    def _train_thread(self, max_iter=0):
         # TF 2.x doesn't use sessions or graphs in eager
 
         # Print full model architecture
@@ -402,6 +406,7 @@ class UIDisplay(object):
         # if we're continuing, don't store the new output image
 
         if self._cycle == 0:
+            # Initial image, random weights, no training.  (Remove?)
             loss = self._sim.get_loss()
             frame_name = self._write_frame(self._output_image)  # Create & save image
             init_meta = {'cycle': self._sim.cycle,
@@ -412,7 +417,7 @@ class UIDisplay(object):
             self._write_metadata()
 
 
-        while not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
+        while (max_iter==0 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
             logging.info("Training batch_size: %i, cycle: %i, learning_rate: %.6f" %
@@ -489,6 +494,9 @@ class UIDisplay(object):
         meta_path = '.'
         meta_file_path = os.path.join(meta_path, meta_filename)
         metadata = {'frames': deepcopy(self._metadata),
+                    'model_file': os.path.abspath(self.get_filename('model')),
+                    'train_image_file': os.path.abspath(self.get_filename('train-image')),
+                    'train_downscale': self._downscale,
                     'loss_history': self._loss_history,
                     'learning_rate_history': self._l_rate_history}
         with open(meta_file_path, 'w') as f:
@@ -496,19 +504,21 @@ class UIDisplay(object):
         logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
 
     def _start(self):
-        # self._train_thread()
+        
         self._worker = Thread(target=self._train_thread)
         self._worker.start()
         logging.info("Started worker thread.")
 
     def _keypress_callback(self, event):
-        if event.key == 'x' or event.key == 'q' or event.key == 'escape':
+        if event.key == 'x' or event.key == 'escape':
             logging.info("Shutdown requested, waiting for worker to finish...")
             self._shutdown = True
+        elif event.key == 'a':
+            self._show_all_hist = not self._show_all_hist
         else:
             logging.info("Unassigned key: %s" % (event.key,))
 
-    def run(self):
+    def run(self, debug_nothread=False):
         """
         Run as interactive matplotlib window, updating when new image is available.
            * left is the current training image
@@ -520,10 +530,16 @@ class UIDisplay(object):
             img = self._gen_image(shape=img_shape)
             self._write_image(img)
             return
-
-        self._start()
-        # self._train_thread()
         
+        if debug_nothread:
+            logging.info("Debug mode, running training in main thread.")
+            self._worker = None
+            self._train_thread(max_iter = 1)  # for debugging, don't start thread, just run in here
+        else:
+            self._start()
+            
+        max_hist_cycles = 5
+        self._show_all_hist = True  # if false only show last max_hist_cycles for plots
 
         if self._nogui:
             logging.info("No GUI mode, waiting for training to finish...")
@@ -533,33 +549,37 @@ class UIDisplay(object):
         while self._sim.image_train is None:
             time.sleep(0.05)
 
-        plt.ion()
-        fig = plt.figure(figsize=(10, 5))
+        plt.ion()            
+        fig = plt.figure(figsize=(12,8))
+
         if self._image_raw.shape[0] > self._image_raw.shape[1]:
-            grid = gridspec.GridSpec(2, 3, height_ratios=[1,3], width_ratios=[3, 3, 2])
+            grid = gridspec.GridSpec(2, 3, height_ratios=[1,2], width_ratios=[1,1,.7])
+            logging.info("Tall images, orienting side-by-side.")
+
+            # tall images, side-by side
             train_ax = fig.add_subplot(grid[:, 0])
             out_ax = fig.add_subplot(grid[:, 1])
-            loss_ax = fig.add_subplot(grid[1, 2])
-            lrate_ax = fig.add_subplot(grid[0, 2], sharex=loss_ax)
+            lrate_ax = fig.add_subplot(grid[0, 2])
+            loss_ax = fig.add_subplot(grid[1, 2],sharex=lrate_ax)
         else:
-            grid = gridspec.GridSpec(3, 2, height_ratios=[4,.5, 1.5], width_ratios=[1, 1])
-            train_ax = fig.add_subplot(grid[0, 0])
-            out_ax = fig.add_subplot(grid[0, 1])
-            loss_ax = fig.add_subplot(grid[2, :])
-            lrate_ax = fig.add_subplot(grid[1, :], sharex=loss_ax)
+            logging.info("Wide images, orienting vertically.")
+
+            grid = gridspec.GridSpec(8, 2, width_ratios=[2,.7])
+            train_ax = fig.add_subplot(grid[:4, 0])
+            out_ax = fig.add_subplot(grid[4:, 0])
+            lrate_ax = fig.add_subplot(grid[:3, 1])
+            loss_ax = fig.add_subplot(grid[3:, 1],sharex=lrate_ax)
 
 
         lrate_ax.grid(which='major', axis='both')
         loss_ax.grid(which='both', axis='both')
-        lrate_ax.set_xlabel("Cycle")
+        lrate_ax.tick_params(labeltop=False, labelbottom=False)# turn off x tick labels for lrate
         lrate_ax.set_ylabel("Learning Rate")
-        lrate_ax.set_title("Learning Rate History")
-        out_ax_title = None
-        train_ax.axis("off")
-        
+        train_ax.axis("off")        
         loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
         loss_ax.set_ylabel("Loss")
-        loss_ax.set_title("Training Loss History")
+        cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
+        loss_ax.set_title("Training Loss History\n%s" % (  cmd,))
 
         lrate_ax.set_ylabel("Learning Rate")
         lrate_ax.set_title("Learning Rate History")
@@ -571,14 +591,15 @@ class UIDisplay(object):
 
         # start main UI loop (training is in the thread):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
-        while not self._shutdown and self._worker.is_alive():
+        
+        while not self._shutdown and (self._worker is None or self._worker.is_alive()):
             try:
                 if artists['train_img'] is None:
                     artists['train_img'] = train_ax.imshow(self._sim.image_train)
                 else:
                     artists['train_img'].set_data(self._sim.image_train)
-                train_ax.set_title("Training Image %s\nCycle %i, downscale:  %.2f" %
-                    (self._sim.image_train.shape, self._cycle+1, self._downscale))
+                train_ax.set_title("Training Image %s\nCycle %i/%i, downscale:  %.2f" %
+                    (self._sim.image_train.shape, self._cycle+1, self._run_cycles, self._downscale))
 
                 if self._output_image is not None:
                     # Can take a while to generate the first image
@@ -596,6 +617,7 @@ class UIDisplay(object):
                     """
                     Plot the individual minibatch losses, and their mean per cycle on top.   
                     """
+
                     graph_update_cycle = self._cycle
                     all_losses = np.hstack(self._loss_history)
                     loss_sizes = [np.array(lh).size for lh in self._loss_history]
@@ -606,9 +628,10 @@ class UIDisplay(object):
                         loss_ax.set_yscale('log')
                     else:
                         artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
-                    # y-axis log
-                    loss_ax.set_ylim(all_losses.min() * 0.9, all_losses.max() * 1.1)
+                    first_ind = 0 if self._show_all_hist else all_losses.size- np.sum(loss_sizes[-max_hist_cycles:])
+                    smallest, biggest = all_losses[first_ind:].min(), all_losses[first_ind:].max()
                     
+                    loss_ax.set_ylim(smallest * 0.9, biggest * 1.1)
 
                     # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
                     # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
@@ -623,13 +646,17 @@ class UIDisplay(object):
 
                     else:
                         artists['lrate'].set_data(lrate_x, lrate_y)
-                    
-                    # limit ticks to 5
-                    #lrate_ax.yaxis.set_major_locator(plt.MaxNLocator(5))
-                    lrate_ax.set_ylim(min(self._l_rate_history) * 0.9, max(self._l_rate_history) * 1.1)
+                    first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
+                    lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
                     
                     # set shared x limit
-                    loss_ax.set_xlim(-(self._cycle+1)/20, self._cycle + (self._cycle+1)/20)
+                    if  self._show_all_hist:
+                        x_max = self._cycle + (self._cycle+1)/20 
+                        x_min = -(self._cycle+1)/20
+                    else:
+                        x_max = self._cycle + .1
+                        x_min = max(0, self._cycle - max_hist_cycles) - .1
+                    lrate_ax.set_xlim(x_min, x_max)
 
                 fig.tight_layout()
                 plt.draw()
@@ -683,7 +710,7 @@ def get_args():
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
-    parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=64)
+    parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parsed = parser.parse_args()
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
 

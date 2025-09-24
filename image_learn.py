@@ -26,8 +26,8 @@ from normal import NormalLayer
 import matplotlib.pyplot as plt
 import json
 import matplotlib.gridspec as gridspec
+from copy import deepcopy
 
-from keras.optimizers.schedules import ExponentialDecay
 
 DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'sigmoid': NormalLayer}
 
@@ -39,7 +39,7 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=16, sharpness=1000.0, grad_sharpness=3.0, learning_rate_initial=0.1, downscale=1.0, **kwargs):
+    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, learning_rate_initial=0.1, downscale=1.0, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
@@ -259,6 +259,7 @@ class UIDisplay(object):
 
 
     """
+    
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
@@ -280,6 +281,7 @@ class UIDisplay(object):
         self._learning_rate_final = learning_rate_final
         self._output_image = None
         self._loss_history = []
+        self._l_rate_history = []
         self._nogui = nogui
         self._metadata = []
         if learning_rate_final is not None:
@@ -288,7 +290,7 @@ class UIDisplay(object):
             if self._run_cycles <= 0:
                 raise Exception("Must specify run_cycles > 0 if annealing with learning_rate_final.")
 
-            self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / self._run_cycles)
+            self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / (self._run_cycles-1)) if self._run_cycles > 1 else 1.0
             logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles." %
                          (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles))
         else:
@@ -312,8 +314,19 @@ class UIDisplay(object):
             meta_filename = self.get_filename('metadata')
             if os.path.exists(meta_filename):
                 with open(meta_filename, 'r') as f:
-                    self._metadata = json.load(f)
+                    metadata = json.load(f)
                 logging.info("Loaded metadata from:  %s" % (meta_filename,))
+                self._metadata = metadata['frames']  if 'frames' in metadata else metadata
+                if 'loss_history' in metadata:
+                    self._loss_history = metadata['loss_history'] 
+                else:
+                    logging.warning("Metadata found but contains no loss history")
+                    self._loss_history = []
+                if 'learning_rate_history' in metadata:
+                    self._l_rate_history = metadata['learning_rate_history'] if 'learning_rate_history' in metadata else []
+                else:
+                    logging.warning("Metadata found but contains no learning rate history")
+                    self._l_rate_history = []
             else:
                 logging.info("No metadata file found:  %s" % (meta_filename,))
 
@@ -398,13 +411,16 @@ class UIDisplay(object):
             self._metadata.append(init_meta)
             self._write_metadata()
 
-        while not self._shutdown and run_cycle < self._run_cycles:
+
+        while not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
             logging.info("Training batch_size: %i, cycle: %i, learning_rate: %.6f" %
                          (self._sim.batch_size, self._sim.cycle, self._learn_rate))
 
             new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate)
+            self._l_rate_history.append(self._learn_rate)
+
             self._loss_history.append(new_losses)
 
             # self._save_state()
@@ -422,6 +438,7 @@ class UIDisplay(object):
 
             self._cycle += 1
             run_cycle += 1
+            
 
             if run_cycle >= self._run_cycles and self._run_cycles > 0:
                 logging.info("Reached max cycles (%i), stopping." % (self._run_cycles,))
@@ -465,16 +482,18 @@ class UIDisplay(object):
         return out_path
     
     def _write_metadata(self):
-        # only if saving frames
-        if self._frame_dir is not None:
-            # write metadata to same file, just overwrite:
-            meta_filename = self.get_filename('metadata')
-            meta_path = '.'
-            meta_file_path = os.path.join(meta_path, meta_filename)
-
-            with open(meta_file_path, 'w') as f:
-                json.dump(self._metadata, f)
-            logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
+        # # only if saving frames
+        # if self._frame_dir is not None:
+        # write metadata to same file, just overwrite:
+        meta_filename = self.get_filename('metadata')
+        meta_path = '.'
+        meta_file_path = os.path.join(meta_path, meta_filename)
+        metadata = {'frames': deepcopy(self._metadata),
+                    'loss_history': self._loss_history,
+                    'learning_rate_history': self._l_rate_history}
+        with open(meta_file_path, 'w') as f:
+            json.dump(metadata, f)
+        logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
 
     def _start(self):
         # self._train_thread()
@@ -503,6 +522,9 @@ class UIDisplay(object):
             return
 
         self._start()
+        # self._train_thread()
+        
+
         if self._nogui:
             logging.info("No GUI mode, waiting for training to finish...")
             self._worker.join()
@@ -514,72 +536,118 @@ class UIDisplay(object):
         plt.ion()
         fig = plt.figure(figsize=(10, 5))
         if self._image_raw.shape[0] > self._image_raw.shape[1]:
-            grid = gridspec.GridSpec(1, 3, height_ratios=[1], width_ratios=[3, 3, 2])
-            train_ax = fig.add_subplot(grid[0, 0])
-            out_ax = fig.add_subplot(grid[0, 1])
-            loss_ax = fig.add_subplot(grid[0, 2])
+            grid = gridspec.GridSpec(2, 3, height_ratios=[1,3], width_ratios=[3, 3, 2])
+            train_ax = fig.add_subplot(grid[:, 0])
+            out_ax = fig.add_subplot(grid[:, 1])
+            loss_ax = fig.add_subplot(grid[1, 2])
+            lrate_ax = fig.add_subplot(grid[0, 2], sharex=loss_ax)
         else:
-            grid = gridspec.GridSpec(2, 2, height_ratios=[2, 1], width_ratios=[1, 1])
+            grid = gridspec.GridSpec(3, 2, height_ratios=[4,.5, 1.5], width_ratios=[1, 1])
             train_ax = fig.add_subplot(grid[0, 0])
             out_ax = fig.add_subplot(grid[0, 1])
-            loss_ax = fig.add_subplot(grid[1, :])
+            loss_ax = fig.add_subplot(grid[2, :])
+            lrate_ax = fig.add_subplot(grid[1, :], sharex=loss_ax)
+
+
+        lrate_ax.grid(which='major', axis='both')
+        loss_ax.grid(which='both', axis='both')
+        lrate_ax.set_xlabel("Cycle")
+        lrate_ax.set_ylabel("Learning Rate")
+        lrate_ax.set_title("Learning Rate History")
+        out_ax_title = None
+        train_ax.axis("off")
+        
+        loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
+        loss_ax.set_ylabel("Loss")
+        loss_ax.set_title("Training Loss History")
+
+        lrate_ax.set_ylabel("Learning Rate")
+        lrate_ax.set_title("Learning Rate History")
+        lrate_ax.set_yscale('log')
 
         fig.canvas.mpl_connect('key_press_event', self._keypress_callback)
 
         artists = {'loss': None, 'train_img': None, 'out_img': None}
 
         # start main UI loop (training is in the thread):
-        while not self._shutdown:
-            if artists['train_img'] is None:
-                artists['train_img'] = train_ax.imshow(self._sim.image_train)
-                train_ax.set_title("Training Image %s\nCycle %i, downscale:  %.2f" %
-                                   (self._sim.image_train.shape, self._cycle, self._downscale))
-                train_ax.axis("off")
-            else:
-                artists['train_img'].set_data(self._sim.image_train)
-                train_ax.set_title("Training Image %s\nCycle %i, downscale:  %.2f" %
-                                   (self._sim.image_train.shape, self._cycle, self._downscale))
-                train_ax.axis("off")
-
-            if self._output_image is not None:
-                # Can take a while to generate the first image
-                if artists['out_img'] is None:
-                    artists['out_img'] = out_ax.imshow(self._output_image)
-                    out_ax.set_title("Output Image %s" % (self._output_image.shape,))
-                    out_ax.axis("off")
+        graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
+        while not self._shutdown and self._worker.is_alive():
+            try:
+                if artists['train_img'] is None:
+                    artists['train_img'] = train_ax.imshow(self._sim.image_train)
                 else:
-                    artists['out_img'].set_data(self._output_image)
-                    out_ax.set_title("Output Image %s" % (self._output_image.shape,))
-                    out_ax.axis("off")
-                    out_ax.set_aspect('equal')
+                    artists['train_img'].set_data(self._sim.image_train)
+                train_ax.set_title("Training Image %s\nCycle %i, downscale:  %.2f" %
+                    (self._sim.image_train.shape, self._cycle+1, self._downscale))
 
-            if len(self._loss_history) > 0:
-                """
-                Plot the individual minibatch losses, and their mean per cycle on top.   
-                """
-                all_losses = np.hstack(self._loss_history)
-                cycle_x = np.linspace(0, self._cycle+1, all_losses.size)
-                total_xy = np.array((cycle_x, all_losses)).T
-                if artists['loss'] is None:
-                    artists['loss'] = loss_ax.plot(total_xy[:, 0], total_xy[:, 1], 'b.', label='Loss per step')[0]
-                    loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
-                    loss_ax.set_ylabel("Loss")
-                    loss_ax.legend()
-                    loss_ax.set_title("Training Loss History")
-                else:
-                    artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
+                if self._output_image is not None:
+                    # Can take a while to generate the first image
+                    out_ax.set_title("Output Image %s\nloss: %.5f" % (self._output_image.shape, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0))
 
-                # y-axis log
-                loss_ax.set_yscale('log')
-                loss_ax.relim()
-                loss_ax.autoscale_view()
+                    if artists['out_img'] is None:
+                        artists['out_img'] = out_ax.imshow(self._output_image)
+                        out_ax.axis("off")
+                    else:
+                        artists['out_img'].set_data(self._output_image)
+                        out_ax.axis("off")
+                        out_ax.set_aspect('equal')
 
-            fig.tight_layout()
-            plt.show()
-            plt.pause(0.2)
+                if len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle:
+                    """
+                    Plot the individual minibatch losses, and their mean per cycle on top.   
+                    """
+                    graph_update_cycle = self._cycle
+                    all_losses = np.hstack(self._loss_history)
+                    loss_sizes = [np.array(lh).size for lh in self._loss_history]
+                    cycle_x = np.hstack([np.linspace(c, c+1.0, size, endpoint=False) for c, size in zip(range(len(loss_sizes)), loss_sizes)])
+                    total_xy = np.array((cycle_x, all_losses)).T
+                    if artists['loss'] is None:
+                        artists['loss'] = loss_ax.plot(total_xy[:, 0], total_xy[:, 1], 'b.', label='Loss per step')[0]
+                        loss_ax.set_yscale('log')
+                    else:
+                        artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
+                    # y-axis log
+                    loss_ax.set_ylim(all_losses.min() * 0.9, all_losses.max() * 1.1)
+                    
+
+                    # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
+                    # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
+                    lrate_y = np.repeat(np.array(self._l_rate_history), 2)
+                    lrate_x0 = np.array(range(len(self._l_rate_history)))
+                    lrate_x = np.zeros(lrate_y.size)
+                    lrate_x[0::2] = lrate_x0
+                    lrate_x[1::2] = lrate_x0 + 1.0
+                    if artists.get('lrate') is None:
+                        artists['lrate'] = lrate_ax.plot(lrate_x, lrate_y, 'r-', label='Learning Rate')[0]
+                        lrate_ax.set_yscale('log')
+
+                    else:
+                        artists['lrate'].set_data(lrate_x, lrate_y)
+                    
+                    # limit ticks to 5
+                    #lrate_ax.yaxis.set_major_locator(plt.MaxNLocator(5))
+                    lrate_ax.set_ylim(min(self._l_rate_history) * 0.9, max(self._l_rate_history) * 1.1)
+                    
+                    # set shared x limit
+                    loss_ax.set_xlim(-(self._cycle+1)/20, self._cycle + (self._cycle+1)/20)
+
+                fig.tight_layout()
+                plt.draw()
+                fig.canvas.flush_events()  # Force canvas to update
+                plt.pause(0.01)
+                
+            except Exception as e:
+                logging.error(f"Error updating GUI: {e}")
+                plt.pause(0.1)  # Longer pause on error
 
             if self._shutdown:
                 break
+        
+        # Clean up after training is done
+        if self._worker.is_alive():
+            self._worker.join(timeout=5.0)
+        plt.ioff()
+        plt.show()  # Keep the final plot visible
 
 
 def get_args():
@@ -615,12 +683,13 @@ def get_args():
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
+    parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=64)
     parsed = parser.parse_args()
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
 
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
-              'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames,
+              'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
     return parsed, kwargs

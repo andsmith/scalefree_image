@@ -299,7 +299,7 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=False, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None,
+    def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
@@ -505,8 +505,8 @@ class UIDisplay(object):
         img = self._sim.gen_image(output_shape=shape, border=self._border)
         return img
 
-    def _write_image(self, img):
-        out_filename = self.get_filename('single-image')
+    def _write_image(self, img, filename=None):
+        out_filename = self.get_filename('single-image') if filename is None else filename
         cv2.imwrite(out_filename, np.uint8(255 * img[:, :, ::-1]))
         logging.info("Wrote:  %s" % (out_filename,))
 
@@ -569,10 +569,10 @@ class UIDisplay(object):
            * middle is the current output image
            * right is the loss history
         """
-        if self._just_image:
+        if self._just_image is not None:
             img_shape = (np.array(self._sim.image_raw.shape[:2]) * self._display_multiplier).astype(int)
             img = self._gen_image(shape=img_shape)
-            self._write_image(img)
+            self._write_image(img, filename = self._just_image)
             return
         
         if debug_nothread:
@@ -801,7 +801,8 @@ def get_args():
 
     parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
     parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
-    parser.add_argument("-j", "--just_image", help="Just do an image, no training.", action='store_true', default=False)
+    parser.add_argument("-j", "--just_image", help="Just generate an an image (use with -m to"+
+                        "generate a high-res image from a trained model)", type=str, default=None)
     parser.add_argument("-e", "--epochs_per_cycle", help="Number of epochs between frames.", type=int, default=1)
     parser.add_argument(
         '-k', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)

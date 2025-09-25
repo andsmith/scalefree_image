@@ -243,7 +243,7 @@ episode_template = {'frame_rate': 20,
 
 
 class MovieMaker(object):
-    def __init__(self, movie_data, output_file, preview=False):
+    def __init__(self, movie_data, output_file, preview=False, frame_rate=None):
         self.movie_data = movie_data
         self.output_file = output_file
         self.preview = preview
@@ -252,7 +252,9 @@ class MovieMaker(object):
             logging.info("Loaded training image of shape:  %s" % (self.train_img.shape,))
         else:
             self.train_img = None
-        self.frame_rate = self.movie_data['frame_rate']
+        if frame_rate is not None:
+            logging.info("Overriding internal frame rate (%s) with command line argument (%s)." % (self.movie_data.get('frame_rate', None), frame_rate))
+        self.frame_rate = frame_rate if frame_rate is not None else self.movie_data['frame_rate']
         self.caption_height_px = self.movie_data['caption_height_px']
         self.episode_data = self.movie_data['episodes']
         self.title_txt = self.movie_data['title']
@@ -650,6 +652,8 @@ def get_args():
     parser.add_argument('-o', '--output_file', type=str,
                         help="Output movie file, e.g. movie.mp4, if not provided will just generate a title card.", default=None)
     parser.add_argument('-p', '--play', action='store_true', help="Play the movie, don't create it.", default=False)
+    parser.add_argument('-f','--frame_rate', type=int,
+                        help="Override the frame rate in the movie json file (default 20).", default=None)
     parser.add_argument('-r', '--move_from_metadata', type=str, 
                         help="Don't use a movie description structure, just play/encode a single metadata file's frames as an episode.", default=None)
     parser.add_argument('-j', '--write_json', type=str,
@@ -710,6 +714,8 @@ if __name__ == "__main__":
         logging.info(f"Loaded movie json file:  {args.movie_json}, has {len(movie_data['episodes'])} episodes.")
 
     if args.write_json:
+        if args.frame_rate is not None:
+            movie_data['frame_rate'] = args.frame_rate 
         with open(args.write_json, 'w') as f:
             json.dump(movie_data, f, indent=4)
         logging.info(f"Wrote {args.write_json}")
@@ -717,7 +723,7 @@ if __name__ == "__main__":
 
     # We need a MovieMaker to generate an mp4, play the movie, and/or make a title card.
     if args.output_file is None and args.play is False:
-        movie_maker = MovieMaker(movie_data, None, preview=False)
+        movie_maker = MovieMaker(movie_data, None, preview=False, frame_rate = args.frame_rate)
 
         # Just make a title card
         # Use 800x600 as a reasonable default size
@@ -735,8 +741,8 @@ if __name__ == "__main__":
 
     if args.play:
         logging.info("Playing movie preview...")
-        movie_maker = MovieMaker(movie_data, None, preview=True)
+        movie_maker = MovieMaker(movie_data, None, preview=True, frame_rate = args.frame_rate)
     elif args.output_file is not None:
         logging.info(f"Creating movie file:  {args.output_file}")
-        movie_maker = MovieMaker(movie_data, args.output_file, preview=False)
+        movie_maker = MovieMaker(movie_data, args.output_file, preview=False, frame_rate = args.frame_rate)
     movie_maker.run()

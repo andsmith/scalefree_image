@@ -182,7 +182,7 @@ class ScaleInvariantImage(object):
             output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output (RGB)')(structure_layer)
             model = Model(inputs=input, outputs=output)
         else:
-            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output (RGB)')(color_layer)
+            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output')(color_layer)
             model = Model(inputs=input, outputs=output)
         
         return model

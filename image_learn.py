@@ -104,7 +104,7 @@ class ScaleInvariantImage(object):
             logging.info("Initialized new model.")
 
         self._model.compile(loss='mean_squared_error',
-                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate))  # default 0.001
+                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=False, ema_momentum=0.99))  # default 0.001
 
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
@@ -174,9 +174,17 @@ class ScaleInvariantImage(object):
             concat_layer = div_layers[0]
 
         color_layer = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
-                            kernel_initializer='random_normal')(concat_layer)
-        output = Dense(3, use_bias=True, activation=tf.nn.sigmoid)(color_layer)
-        model = Model(inputs=input, outputs=output)
+                            kernel_initializer='random_normal',name='colors')(concat_layer)
+        
+        if False:  # using structure layer before colors?
+            structure_layer = Dense(100, activation=tf.nn.relu, use_bias=True,
+                                    kernel_initializer='random_normal', name='structure')(color_layer)
+            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output (RGB)')(structure_layer)
+            model = Model(inputs=input, outputs=output)
+        else:
+            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output (RGB)')(color_layer)
+            model = Model(inputs=input, outputs=output)
+        
         return model
 
     def get_loss(self):
@@ -330,8 +338,8 @@ class UIDisplay(object):
                 raise Exception("Must specify run_cycles > 0 if annealing with learning_rate_final.")
             if learning_rate >0:
                 self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / (self._run_cycles-1)) if self._run_cycles > 1 else 1.0
-                logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles." %
-                            (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles))
+                logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles (Decay constant: %.6f)." %
+                            (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles, self._learning_rate_decay))
             else:
                 self._learning_rate_decay = 0.0
         else:

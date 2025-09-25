@@ -15,11 +15,12 @@ class InitRadiiRandom(Initializer):
         pass
 
     def __call__(self, shape, dtype=None, **kwargs):
-        spread = [.01, 1.0]
+        spread = [.05, 4.0]
         sigmas = (np.random.rand(self._num) - spread[0]) * (spread[1] - spread[0])
-        sigmas = sigmas ** 5.0  # bias towards smaller radii (does this do anything?)
-        sigmas = np.clip(sigmas, 0.005, 1.0)
-        return sigmas
+        sigmas = sigmas ** 1.0  # bias towards smaller radii (does this do anything?)
+        sigmas = np.clip(sigmas, spread[0], spread[1])
+        log_sigmas = np.log(sigmas)
+        return log_sigmas
 
 
 class CircleLayer(Layer):
@@ -59,7 +60,7 @@ class CircleLayer(Layer):
         super(CircleLayer, self).build(input_shape)
 
     def call(self, x):
-        radii = K.log(1.0 + K.exp(self.radii))  # all radii must be positive, so use the soft-ReLu transform
+        radii = K.exp(self.radii)
         C = K.expand_dims(self.centers)
         sqdist = K.transpose(C-K.transpose(x))**2.0
         dist = K.sqrt(tf.reduce_sum(sqdist, 1))

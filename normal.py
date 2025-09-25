@@ -11,7 +11,7 @@ class NormalLayer(Layer):
     """
     Just look at the input space with regular RELU units.
     """
-    def __init__(self, output_dim, **kwargs):
+    def __init__(self, output_dim,sharpness, grad_sharpness, **kwargs):
         self.output_dim = output_dim
         self.initializer = RandomUniform(-1.0, 1.0)
         self.kernel = None

@@ -176,13 +176,13 @@ class ScaleInvariantImage(object):
         color_layer = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
                             kernel_initializer='random_normal',name='colors')(concat_layer)
         
-        if False:  # using structure layer before colors?
-            structure_layer = Dense(100, activation=tf.nn.relu, use_bias=True,
+        if True:  # using structure layer before colors?
+            structure_layer = Dense(32, activation=tf.nn.relu, use_bias=True,
                                     kernel_initializer='random_normal', name='structure')(color_layer)
-            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output (RGB)')(structure_layer)
+            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output_RGB')(structure_layer)
             model = Model(inputs=input, outputs=output)
         else:
-            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output')(color_layer)
+            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output_RGB')(color_layer)
             model = Model(inputs=input, outputs=output)
         
         return model

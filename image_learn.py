@@ -176,7 +176,7 @@ class ScaleInvariantImage(object):
         color_layer = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
                             kernel_initializer='random_normal',name='colors')(concat_layer)
         
-        if True:  # using structure layer before colors?
+        if False:  # using structure layer before colors?
             structure_layer = Dense(32, activation=tf.nn.relu, use_bias=True,
                                     kernel_initializer='random_normal', name='structure')(color_layer)
             output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output_RGB')(structure_layer)

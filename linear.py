@@ -10,7 +10,10 @@ import logging
 
 class LineLayer (Layer):
     """
-    Layer of sharp line units
+    Layer of sharp line units.
+    
+    Lines are parameterized by angle and offset from origin.
+    
     Like tanh units, but compress horizontally to a constant width
     """
 
@@ -22,7 +25,8 @@ class LineLayer (Layer):
             self.initializer = RandomUniform(-1.0, 1.0)
         else:
             self.initializer = initializer
-        self.centers = None
+        # self.centers = 
+        self.offsets = None
         self.angles = None
         self.sharpness = None
         super(LineLayer, self).__init__(**kwargs)
@@ -30,12 +34,17 @@ class LineLayer (Layer):
         logging.info(f"LineLayer initialized with grad_sharpness={self.grad_sharpness}, sharpness={self._sharpness}")
 
     def build(self, input_shape):
-        self.centers = self.add_weight(name='centers',
-                                       shape=(self.output_dim, input_shape[1]),
-                                       initializer=self.initializer,
+        # self.centers = self.add_weight(name='centers',
+        #                                shape=(self.output_dim, input_shape[1]),
+        #                                initializer=self.initializer,
+        #                                trainable=True)
+        
+        self.offsets = self.add_weight(name='offsets',
+                                       shape=(self.output_dim, ),
+                                       initializer=RandomUniform(-1.,1.),
                                        trainable=True)
 
-        self.angles = self.add_weight(name='betas',
+        self.angles = self.add_weight(name='angles',
                                       shape=(self.output_dim,),
                                       initializer=RandomUniform(-np.pi, np.pi),
                                       trainable=True)
@@ -47,16 +56,24 @@ class LineLayer (Layer):
         super(LineLayer, self).build(input_shape)
 
     def call(self, x):
+        # # Excitation for theta, center parameterization:
+        # unit_vectors = K.concatenate((K.expand_dims(K.cos(self.angles)),
+        #                               K.expand_dims(K.sin(self.angles))), 1)
+        # C = K.expand_dims(self.centers)
+        # vecs = K.transpose(C-K.transpose(x))
 
-        unit_vectors = K.concatenate((K.expand_dims(K.cos(self.angles)),
-                                      K.expand_dims(K.sin(self.angles))), 1)
-        C = K.expand_dims(self.centers)
-        vecs = K.transpose(C-K.transpose(x))
-
-        # normalize to unit vectors
-        vecs = vecs / (K.sqrt(tf.reduce_sum(vecs**2, axis=1, keepdims=True)) + 1e-10)
-        # take the dot product of input vector with each unit vector
-        cos_theta = tf.reduce_sum(tf.multiply(vecs, K.transpose(unit_vectors)), axis=1)
+        # # normalize to unit vectors
+        # vecs = vecs / (K.sqrt(tf.reduce_sum(vecs**2, axis=1, keepdims=True)) + 1e-10)
+        # # take the dot product of input vector with each unit vector
+        # cos_theta = tf.reduce_sum(tf.multiply(vecs, K.transpose(unit_vectors)), axis=1)
+        
+        
+        # Excitation for theta, offset parameterization:
+        theta = self.angles
+        perp_offsets = self.offsets
+        # Signed perpendicular distance from input xy to line defined by angle theta and offset perp_offsets
+        # Use broadcasting to compute distances for all batch samples and all units
+        distances = K.expand_dims(x[:, 0], 1) * K.cos(theta) + K.expand_dims(x[:, 1], 1) * K.sin(theta) - perp_offsets
 
         # Use sharp activation but false gradient
         @tf.custom_gradient
@@ -72,7 +89,7 @@ class LineLayer (Layer):
 
             return forward_result, grad_fn
 
-        p = sharp_with_false_grad(cos_theta)
+        p = sharp_with_false_grad(distances)
 
         return p
 

@@ -12,7 +12,14 @@ def downscale_image(image, factor):
     logging.info("Downsampling (factor = %.1f) image from %s to %s" % (factor, image.shape, new_shape))
     return cv2.resize(image, new_shape[::-1], interpolation=cv2.INTER_AREA)
 
-
+def fade(image, alpha):
+    """ Fade an image towards white by factor alpha (0.0 = white, 1.0 = original image)
+    image: HxWxC image
+    alpha: fading factor
+    returns: faded image
+    """
+    faded = (image.astype(np.float32) * alpha + 255 * (1 - alpha)).astype(np.uint8)
+    return faded
 def make_input_grid(img_shape=None, resolution=1.0, border=0.0, keep_aspect=True):
     """ Make a grid of input coordinates in [-1,1]x[-1,1]
     img_shape: (height, width, channels)
@@ -122,9 +129,10 @@ def add_text(image, text_lines, bbox, line_spacing = 1.5, max_font_scale=3.0, mi
         else:
             raise ValueError("Unknown justify option: %s" % justify)
         y_start = y_text + v_spacing
+        image[y_text,x_text-10:] = 0
         cv2.putText(image, line, (x_text, y_text), font_face, font_scale, color, font_thickness, lineType=cv2.LINE_AA)
 
-    #draw_bbox(image, bbox, color=(255, 255, 0), thickness=4)
+    draw_bbox(image, bbox, color=(255, 255, 0), thickness=4)
 
 
 def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
@@ -140,6 +148,7 @@ def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
 
 def captioned_frame(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0),
                     justify='center', line_spacing=1.5, font_face=cv2.FONT_HERSHEY_SIMPLEX, **kwargs):
+
     caption_h = caption_height_px
     pad_x, pad_y = caption_pad_xy
     img_cap = np.zeros((img.shape[0]+caption_h, img.shape[1], 3), dtype=np.uint8)

@@ -26,6 +26,7 @@ class LineLayer (Layer):
         else:
             self.initializer = initializer
         # self.centers = 
+        #self.centers = None
         self.offsets = None
         self.angles = None
         self.sharpness = None
@@ -54,9 +55,10 @@ class LineLayer (Layer):
                                          initializer=Constant(self._sharpness),
                                          trainable=False)
         super(LineLayer, self).build(input_shape)
+    
 
     def call(self, x):
-        # # Excitation for theta, center parameterization:
+        # Excitation for theta, center parameterization:
         # unit_vectors = K.concatenate((K.expand_dims(K.cos(self.angles)),
         #                               K.expand_dims(K.sin(self.angles))), 1)
         # C = K.expand_dims(self.centers)
@@ -66,7 +68,7 @@ class LineLayer (Layer):
         # vecs = vecs / (K.sqrt(tf.reduce_sum(vecs**2, axis=1, keepdims=True)) + 1e-10)
         # # take the dot product of input vector with each unit vector
         # cos_theta = tf.reduce_sum(tf.multiply(vecs, K.transpose(unit_vectors)), axis=1)
-        
+        # excitation = cos_theta
         
         # Excitation for theta, offset parameterization:
         theta = self.angles
@@ -74,7 +76,7 @@ class LineLayer (Layer):
         # Signed perpendicular distance from input xy to line defined by angle theta and offset perp_offsets
         # Use broadcasting to compute distances for all batch samples and all units
         distances = K.expand_dims(x[:, 0], 1) * K.cos(theta) + K.expand_dims(x[:, 1], 1) * K.sin(theta) - perp_offsets
-
+        excitation = distances
         # Use sharp activation but false gradient
         @tf.custom_gradient
         def sharp_with_false_grad(cos_theta_arg):
@@ -89,7 +91,7 @@ class LineLayer (Layer):
 
             return forward_result, grad_fn
 
-        p = sharp_with_false_grad(distances)
+        p = sharp_with_false_grad(excitation)
 
         return p
 

@@ -15,9 +15,8 @@ class InitRadiiRandom(Initializer):
         pass
 
     def __call__(self, shape, dtype=None, **kwargs):
-        spread = [.05, 4.0]
-        sigmas = (np.random.rand(self._num) - spread[0]) * (spread[1] - spread[0])
-        sigmas = sigmas ** 1.0  # bias towards smaller radii (does this do anything?)
+        spread = [1.5, 1.5]
+        sigmas = (np.random.rand(self._num) ** 1.0 - spread[0]) * (spread[1] - spread[0])
         sigmas = np.clip(sigmas, spread[0], spread[1])
         log_sigmas = np.log(sigmas)
         return log_sigmas

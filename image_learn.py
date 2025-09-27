@@ -17,7 +17,7 @@ import cv2
 import time
 import os
 import logging
-from util import make_input_grid, downscale_image, make_central_weights
+from util import make_input_grid, downscale_image, make_central_weights, fade
 import argparse
 from threading import Thread
 from circular import CircleLayer
@@ -40,11 +40,12 @@ class ScaleInvariantImage(object):
 
     """
 
-    def __init__(self, image_raw, n_hidden, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
+    def __init__(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
                  learning_rate_initial=0.1, downscale=1.0, center_weight_params=None, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
+        :param n_structure: number of structure units
         :param n_div: dictionary containing the number of input units for each division type
         :param n_div_s: number of input units for sigmoid division
         :param state_file: if not None, a file to load the model state from (overrides other args except learning rate, batch size)
@@ -60,6 +61,7 @@ class ScaleInvariantImage(object):
         self.image_raw = image_raw
         self.n_hidden = n_hidden
         self.n_div = n_div
+        self.n_structure = n_structure
         self.batch_size = batch_size
         self.grad_sharpness = grad_sharpness
         self.image_train = None
@@ -69,15 +71,24 @@ class ScaleInvariantImage(object):
         self.cycle = 0  # increment for each call to train_more()
         self._center_weight_params = center_weight_params
         self._learning_rate = learning_rate_initial
+        self._artists = {'circular':{
+                            'center_points':[],
+                            'curves': []},
+                         'linear': {
+                             'center_points': [],
+                             'lines': []},
+                         'sigmoid': { 
+                             'bands': []}}
 
+        self._lims_set = False
 
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
             # (so they can be None in the args)
             state = ScaleInvariantImage._load_state(state_file)
             weights = state['weights']
-            self.cycle, self.image_raw, self.n_hidden, self.n_div,  self.sharpness, self.grad_sharpness, self._downscale = \
-                state['cycle'], state['image_raw'], state['n_hidden'], state['n_div'], state['sharpness'], state['grad_sharpness'], state['downscale']
+            self.cycle, self.image_raw, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness, self._downscale = \
+                state['cycle'], state['image_raw'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness'], state['downscale']
             # Checks
             if image_raw is not None and image_raw.shape != self.image_raw.shape:
                 logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
@@ -144,6 +155,197 @@ class ScaleInvariantImage(object):
                      (grid_shape, input[:, 0].min(), input[:, 0].max(), input[:, 1].min(), input[:, 1].max(), input.shape[0]))
         self._input, self._output = input, output
         return input, output
+    
+    def get_div_params(self):
+        """
+        Get the parameters of the division units.  For L lines, C circles, and S sigmoids, 
+        returns:  dict{
+            'circular': {'centers': Lx2 array, 'angles': L array}
+            'linear': {'centers': Cx2 array, 'radii': C array}
+            'sigmoid': {'weights': Sx2 array, 'biases': S array}}
+        """
+        params = {}
+        for layer in self._model.layers:
+            if layer.__class__.__name__ == 'CircleLayer':
+                weights = layer.get_weights()
+                params['circular'] = {'centers': weights[0], 'radii': np.exp(weights[1])}  # radii are stored as log(r)
+            elif layer.__class__.__name__ == 'LineLayer':
+                weights = layer.get_weights()
+                # three param:
+                #params['linear'] = {'centers': weights[0], 'angles': weights[1]}
+                
+                # two param"
+                params['linear'] = {'offsets': weights[0], 'angles': weights[1]}
+            elif layer.__class__.__name__ == 'NormalLayer':
+                weights = layer.get_weights()
+                params['sigmoid'] = {'weights': weights[0], 'biases': weights[1]}
+        return params
+
+    def unit_coords_to_pixels(self, coords_xy, img_shape, orig_aspect=True):
+        """
+        Convert unit coordinates (x,y) in [-1,1]x[-1,1] to pixel coordinates in [0,w-1]x[0,h-1]
+        :param img_shape: (h,w,c) shape of the image
+        :param orig_aspect: assume coords are bounded on the narrower dimension
+           to use the training image's aspect ratio, otherwise assume square
+        """
+        w, h = self.image_train.shape[1], self.image_train.shape[0]
+
+        if orig_aspect:
+            # unscale to unit square
+            aspect_ratio = w / h
+            if aspect_ratio > 1:
+                x = coords_xy[:,0]
+                y = coords_xy[:,1] * aspect_ratio
+            else:
+                x = coords_xy[:,0] / aspect_ratio
+                y = coords_xy[:,1]
+        else:
+            x = coords_xy[:,0]
+            y = coords_xy[:,1]
+            
+        # now scale to pixel coords
+        px = (x + 1.0) * 0.5 * (img_shape[1]-1)
+        py = (y + 1.0) * 0.5 * (img_shape[0]-1)
+        return np.hstack((px.reshape(-1, 1), py.reshape(-1, 1)))
+
+
+    def draw_div_units(self, ax, output_image=None, margin=0.1, norm_colors=True):
+        """
+        # Draw a representation of the division units on the given axis.
+        For line units: 
+            Put a hollow dot at the center, draw a line segment through it at the angle
+        For circle units:
+            Draw a circle at the center, and the circle with the radius
+        for normal units:
+            if "tanh" activation function, draw a band parallel to the line implied
+            by the weights & bias, and thickness proportional to the inverse of the weight norm.
+        :param ax: a matplotlib axis to draw on
+        :param margin: The x and y limits will be [-1, +1] on the larger dimension,
+            (-a-margin, a+margin)) on the smaller, where a is min(aspect, 1/aspect)
+        """
+        img_ax= ax 
+        
+        aspect_ratio = self.image_train.shape[1] / self.image_train.shape[0]
+        if aspect_ratio > 1:
+             x_lim = (-1.0, 1.0)
+             y_lim = (-1/aspect_ratio, 1/aspect_ratio)
+        else:
+             x_lim = (-aspect_ratio, aspect_ratio)
+             y_lim = (-1.0/aspect_ratio-margin, 1.0/aspect_ratio+margin)
+             
+        # normalize so each channel spans full range:
+        if norm_colors and output_image is not None:
+            for c in range(3):
+                c_min, c_max = output_image[:, :, c].min(), output_image[:, :, c].max()
+                if c_max > c_min:
+                    output_image[:, :, c] = (output_image[:, :, c] - c_min) / (c_max - c_min)
+                        
+            image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
+            img_ax.imshow(output_image if output_image is not None else self.image_train, extent=image_extent)
+        #ax.invert_yaxis()
+
+        params = self.get_div_params()
+        
+        if 'linear' in params:
+            if 'centers' in params['linear']:
+                centers = params['linear']['centers'].reshape(-1,2)  # switch to (x,y)
+                # FLIP Y for display
+                #centers = centers[:,::-1]
+                #centers[:,1] = -centers[:,1]
+                angles = params['linear']['angles']
+                if len(self._artists['linear']['center_points']) == 0:
+                    self._artists['linear']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
+                                                                        'o', color='red', markersize=4, alpha=0.5)[0])
+                else:
+                    self._artists['linear']['center_points'][0].set_data(centers[:,0], centers[:,1])
+
+                for i in range(self.n_div['linear']):
+                    c = centers[i]
+                    a = angles[i]
+                    line_len = 3.0
+                    dx = np.cos(a) * line_len
+                    dy = np.sin(a) * line_len
+                    if len(self._artists['linear']['lines']) <= i:
+                        line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='red', alpha=0.5)
+                        self._artists['linear']['lines'].append(line)
+                    else:
+                        self._artists['linear']['lines'][i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy])
+
+            elif 'offsets' in params['linear']:
+                # 2 parameterization of the line (angle, offset from origin)
+                offsets = params['linear']['offsets']
+                angles = params['linear']['angles']
+                normals = np.vstack((np.cos(angles), np.sin(angles))).T
+                for l_i in range(self.n_div['linear']):
+                    n = normals[l_i]
+                    d = offsets[l_i]
+                    # point on line closest to origin:
+                    c = n * d
+                    line_len = 3.0
+                    dx = np.cos(angles[l_i]) * line_len
+                    dy = np.sin(angles[l_i]) * line_len
+                    if len(self._artists['linear']['center_points']) <= l_i:
+                        self._artists['linear']['center_points'].append( ax.plot(c[0], c[1], 
+                                                                            'o', color='blue', markersize=4, alpha=0.5)[0])
+                    else:
+                        self._artists['linear']['center_points'][l_i].set_data(c[0], c[1])
+
+                    if len(self._artists['linear']['lines']) <= l_i:
+                        line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='blue', alpha=0.5)
+                        self._artists['linear']['lines'].append(line)
+                    else:
+                        self._artists['linear']['lines'][l_i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy]
+                                                                      )
+        if 'circles' in params:
+            centers = params['circular']['centers']# switch to (x,y)
+            centers[:,1] = -centers[:,1]
+            radii = params['circular']['radii']
+
+            if len(self._artists['circular']['center_points']) == 0:
+                self._artists['circular']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
+                                                                    'o', color='blue', markersize=4, alpha=0.5)[0])
+            else:
+                self._artists['circular']['center_points'][0].set_data(centers[:,0], centers[:,1])
+            
+            for i in range(centers.shape[0]):
+                c = centers[i]
+                r = radii[i]
+                if len(self._artists['circular']['curves']) <= i:
+                    circle_inner = plt.Circle((c[0], c[1]), r, color='red', fill=False)
+                    ax.add_artist(circle_inner)
+                    self._artists['circular']['curves'].append(circle_inner)
+                else:
+                    self._artists['circular']['curves'][i].set_radius(r)
+                    self._artists['circular']['curves'][i].set_center((c[0], c[1]))
+                    
+                    
+        if 'sigmoid' in params:
+            weights = params['sigmoid']['weights']
+            # flip Y for display
+            weights[:,1] = -weights[:,1]
+            biases = params['sigmoid']['biases']
+            for i in range(weights.shape[0]):
+                w = weights[i]
+                b = biases[i]
+                norm = np.sqrt(w[0]**2 + w[1]**2)
+                if norm > 0:
+                    ax.plot([-1, 1], [(-w[0]/w[1])*-1 + b/w[1], (-w[0]/w[1])*1 + b/w[1]], '-', color='green', alpha=0.5, linewidth=1.0/norm)    
+                    # also draw a band around the line
+                    
+                    band_width = 0.5/norm
+                    ax.fill_between([-1, 1], [(-w[0]/w[1])*-1 + b/w[1] - band_width, (-w[0]/w[1])*1 + b/w[1] - band_width],
+                                    [(-w[0]/w[1])*-1 + b/w[1] + band_width, (-w[0]/w[1])*1 + b/w[1] + band_width],
+                                    color='green', alpha=0.2)   
+        # Flip y axis so it's like image
+        ax.invert_yaxis()
+        if True:#not self._lims_set:
+            ax.set_xlim(np.array(x_lim))
+            ax.set_ylim(np.array(y_lim))
+        img_ax.set_aspect('equal')
+        ax.set_aspect('equal')
+        
+
+        plt.show()
 
     def _init_model(self):
         """
@@ -173,18 +375,18 @@ class ScaleInvariantImage(object):
         else:
             concat_layer = div_layers[0]
 
-        color_layer = Dense(self.n_hidden, activation=tf.nn.relu, use_bias=True,
-                            kernel_initializer='random_normal',name='colors')(concat_layer)
         
-        if False:  # using structure layer before colors?
-            structure_layer = Dense(32, activation=tf.nn.relu, use_bias=True,
-                                    kernel_initializer='random_normal', name='structure')(color_layer)
-            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output_RGB')(structure_layer)
-            model = Model(inputs=input, outputs=output)
+        if self.n_structure>0:  # using structure layer before colors?
+            structure_layer = Dense(self.n_structure, activation=tf.nn.relu, use_bias=True,
+                                    kernel_initializer='random_normal', name='structure_layer')(concat_layer)
         else:
-            output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output_RGB')(color_layer)
-            model = Model(inputs=input, outputs=output)
+            structure_layer = concat_layer
         
+        color_layer = Dense(self.n_hidden, activation=tf.nn.tanh, use_bias=True,
+                            kernel_initializer='random_normal',name='color_layer')(structure_layer)
+        output = Dense(3, use_bias=True, activation=tf.nn.sigmoid, name='Output_RGB')(color_layer)
+        model = Model(inputs=input, outputs=output)
+    
         return model
 
     def get_loss(self):
@@ -254,6 +456,7 @@ class ScaleInvariantImage(object):
                 'cycle': self.cycle,
                 'downscale': self._downscale,
                 'n_div': self.n_div,
+                'n_structure': self.n_structure,
                 'n_hidden': self.n_hidden,
                 'sharpness': self.sharpness,
                 'grad_sharpness': self.grad_sharpness
@@ -308,12 +511,13 @@ class UIDisplay(object):
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None,
-                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
+                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_div = n_div
         self.n_hidden = n_hidden
+        self.n_structure = n_structure
         self._center_weight_params = center_weight_params
         self._update_plots = False
         self._run_cycles = run_cycles
@@ -355,7 +559,7 @@ class UIDisplay(object):
         # model/image file prefix is the image bare name without extension
         self._file_prefix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
 
-        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, learning_rate_initial=self._learn_rate,
+        self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, n_structure=n_structure, learning_rate_initial=self._learn_rate,
                                         batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, 
                                         downscale=self._downscale, center_weight_params=self._center_weight_params, **kwargs)
 
@@ -399,7 +603,9 @@ class UIDisplay(object):
             if n_div > 0:
                 arch_str += "%i%s-" % (n_div, div_type[0])
         arch_str = arch_str[:-1]  # remove trailing -
-        arch_str += "_%ih" % (self.n_hidden,)
+        if self.n_structure >0:
+            arch_str += "_%it" % (self.n_structure,)
+        arch_str += "_%ic" % (self.n_hidden,)
         return arch_str
 
     def get_filename(self, which='model'):
@@ -434,7 +640,8 @@ class UIDisplay(object):
         logging.info("Starting training:")
         logging.info("\tBatch size: %i" % (self._sim.batch_size,))
         logging.info("\tDiv types:  %s" % (self._get_arch_str(),))
-        logging.info("\tHidden units:  %i" % (self.n_hidden,))
+        logging.info("\tStructure units:  %i" % (self.n_structure,))
+        logging.info("\tColor units:  %i" % (self.n_hidden,))
         logging.info("\tSharpness: %f" % (self._sim.sharpness,))
         logging.info("\tGradient sharpness: %f" % (self._sim.grad_sharpness,))
 
@@ -585,8 +792,12 @@ class UIDisplay(object):
         
         if debug_nothread:
             logging.info("Debug mode, running training in main thread.")
+            #self._train_thread(max_iter = 1)  # for debugging, don't start thread, just run in here
+            self._output_image = self._gen_image()
+            fig, ax = plt.subplots(1,1)
+            self._sim.draw_div_units(ax=ax, output_image=self._output_image)
+            plt.show()
             self._worker = None
-            self._train_thread(max_iter = 1)  # for debugging, don't start thread, just run in here
         else:
             self._start()
             
@@ -595,7 +806,8 @@ class UIDisplay(object):
 
         if self._nogui:
             logging.info("No GUI mode, waiting for training to finish...")
-            self._worker.join()
+            if self._worker is not None:
+                self._worker.join()
             return
 
         while self._sim.image_train is None:
@@ -637,16 +849,16 @@ class UIDisplay(object):
             train_ax = fig.add_subplot(grid[:4, 0])
             out_ax = fig.add_subplot(grid[4:, 0])
         
-        if self._center_weight_params is not None:            
-            lrate_ax = fig.add_subplot(grid[:3, -1])
-            loss_ax = fig.add_subplot(grid[3:6, -1],sharex=lrate_ax)
-            weight_ax = fig.add_subplot(grid[6:, -1])
-            weights_plotted=False
-        else:
-            lrate_ax = fig.add_subplot(grid[:3, -1])
-            loss_ax = fig.add_subplot(grid[3:, -1],sharex=lrate_ax)
-            weight_ax = None
-            weights_plotted=True
+        #if self._center_weight_params is not None:            
+        lrate_ax = fig.add_subplot(grid[:2, -1])
+        loss_ax = fig.add_subplot(grid[2:5, -1],sharex=lrate_ax)
+        weight_ax = fig.add_subplot(grid[5:, -1])
+        weights_plotted=False
+        # else:
+        #     lrate_ax = fig.add_subplot(grid[:3, -1])
+        #     loss_ax = fig.add_subplot(grid[3:, -1],sharex=lrate_ax)
+        #     weight_ax = None
+        #     weights_plotted=True
             
                 
 
@@ -698,33 +910,37 @@ class UIDisplay(object):
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
 
-            if not weights_plotted:
-                if self._center_weight_params is not None and self._sim.weight_cross_sections is not None and weight_ax is not None:
-                    weight_ax.cla()
-                    xc, yc = self._sim.weight_cross_sections['x'], self._sim.weight_cross_sections['y']
-                    weight_ax.plot(np.linspace(0, 1.0, xc.size), xc, 'r-', label='X cross-section')
-                    weight_ax.plot(np.linspace(0, 1.0, yc.size), yc, 'b-', label='Y cross-section')
-                    weight_ax.set_title("Sample Weights Cross-Sections")
-                    #weight_ax.set_ylabel("Relative Weight")
-                    #weight_ax.set_xlabel("Pixel Index")
-                    weight_ax.legend(fontsize=8)
-                    # turn off x axis labels, tickes
-                    weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
-                                            left=True, right=False, bottom=False, top=False)
-                    weight_ax.set_ylim(0.0, self._center_weight_params['weight'] * 1.1)
-                    # add grid
-                    weight_ax.grid(which='both', axis='y')
-                    weights_plotted=True
+            # if not weights_plotted:
+            #     if self._center_weight_params is not None and self._sim.weight_cross_sections is not None and weight_ax is not None:
+            #         weight_ax.cla()
+            #         xc, yc = self._sim.weight_cross_sections['x'], self._sim.weight_cross_sections['y']
+            #         weight_ax.plot(np.linspace(0, 1.0, xc.size), xc, 'r-', label='X cross-section')
+            #         weight_ax.plot(np.linspace(0, 1.0, yc.size), yc, 'b-', label='Y cross-section')
+            #         weight_ax.set_title("Sample Weights Cross-Sections")
+            #         #weight_ax.set_ylabel("Relative Weight")
+            #         #weight_ax.set_xlabel("Pixel Index")
+            #         weight_ax.legend(fontsize=8)
+            #         # turn off x axis labels, tickes
+            #         weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
+            #                                 left=True, right=False, bottom=False, top=False)
+            #         weight_ax.set_ylim(0.0, self._center_weight_params['weight'] * 1.1)
+            #         # add grid
+            #         weight_ax.grid(which='both', axis='y')
+            #         weights_plotted=True
+            
 
             if self._output_image is not None:
                 # Can take a while to generate the first image
                 out_ax.set_title("Cycle %i loss: %.5f\nOutput Image %s" % (self._cycle, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
+                out_img =self._output_image
+                self._sim.draw_div_units(weight_ax, output_image=out_img, norm_colors=True)
 
+                        
                 if artists['out_img'] is None:
-                    artists['out_img'] = out_ax.imshow(self._output_image)
+                    artists['out_img'] = out_ax.imshow(out_img)
                     out_ax.axis("off")
                 else:
-                    artists['out_img'].set_data(self._output_image)
+                    artists['out_img'].set_data(out_img)
                     out_ax.axis("off")
                     out_ax.set_aspect('equal')
 
@@ -781,8 +997,8 @@ class UIDisplay(object):
             fig.tight_layout()
             plt.draw()
             fig.canvas.flush_events()  # Force canvas to update
-            plt.pause(0.2)
                 
+            plt.pause(0.1)
             # except Exception as e:
             #     logging.error(f"Error updating GUI: {e}")
             #     plt.pause(0.1)  # Longer pause on error
@@ -806,7 +1022,8 @@ def get_args():
     parser.add_argument("-c", "--circles", help="Number of circular division units.", type=int, default=0)
     parser.add_argument("-l", "--lines", help="Number of linear division units.", type=int, default=0)
     parser.add_argument("-s", "--sigmoids", help="Number of sigmoid division units.", type=int, default=0)
-
+    parser.add_argument("-t", "--structure_units", help="Size of structure layer (before color layer), default 0 (no structure layer)"
+                        , type=int, default=0)
     parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
     parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
     parser.add_argument("-j", "--just_image", help="Just generate an an image (use with -m to"+
@@ -820,7 +1037,7 @@ def get_args():
         "-b", "--border", help="Extrapolate outward from the original shape by this factor.", type=float, default=0.0)
     parser.add_argument(
         "-p", "--downscale", help="downscale image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
-    parser.add_argument('-r', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=.01)
+    parser.add_argument('-r', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=1.0)
     parser.add_argument('-a', "--learning_rate_final",
                         help="Reduce by multiplicative constant over <cycles> cycles.", type=float, default=None)
     parser.add_argument("--sharpness", help="Sharpness constant for activation function, " +
@@ -845,7 +1062,7 @@ def get_args():
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,
-              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles,
+              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
     return parsed, kwargs
 

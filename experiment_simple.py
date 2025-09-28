@@ -11,23 +11,12 @@ import matplotlib.pyplot as plt
 from util import draw_bbox
 import matplotlib.gridspec as gridspec
 import cv2
+import json
 NEON_GREEN = (57, 255, 20)
 
 VERBOSE=False
 
-def run_trial(test_params, trial_ind, const_params):
-    print(f"\n\n\nRunning trial {trial_ind} with test params: {test_params}\n\n\n")
-    params = const_params.copy()
-    params.update(test_params)
-    # Simulate some processing
-    test_image = params['_test_image']
-    del params['_image_file']
-    del params['_test_image']
-    del params['_model_file']
-    params['nogui'] = True
-    uid = UIDisplay(image_file=None, model_file=None, synth_image_name=test_image, verbose=VERBOSE, **params)
-    loss, image = uid.run()
-    return {'test_params': test_params, 'trial_ind': trial_ind, 'loss': loss, 'image': image, 'train_image': uid.get_train_image()}
+trial_cache_dir = "trial_cache"
 
 class Experiment(object):
     """
@@ -57,7 +46,10 @@ class Experiment(object):
         self.stats=None
         self.n_trials = n_trials
         self.trials = self._gen_work()
-        
+        if not os.path.exists(trial_cache_dir):
+            os.makedirs(trial_cache_dir)
+            
+            
     def _gen_work(self):
         """
         A work unit is 1 dict of test parameters, 1 trial index, and the constant parameters dict.
@@ -387,6 +379,76 @@ def get_var_str(values):
 
     return par_val_str
 
+
+def params_to_cache_filename(params, test_image, trial_ind):
+    """
+    Create a short string representing the parameters, for use in filenames and caching results.
+    [test_name]_[param_string]_[trial_ind].pkl
+    """
+    param_abbrevs = {
+                    'batch_size': 'z%i',
+                    'center_weight_params': 'w%.2f_%.3f_%.3f_%.3f_%.3f',  # max_wt, spread, flat, x, y
+                    'learning_rate': 'r%5f',
+                    'learning_rate_final': 'rf%5f',
+                    'epochs_per_cycle': 'e%i',
+                    'run_cycles': 'k%i',
+                    'grad_sharpness': 'g%.1f',
+                    'n_hidden': 'n%i',
+                    'n_structure': 't%i',                
+        }
+    def fill(name, value):
+            if value is None:
+                return None
+            return param_abbrevs[name] % value
+        
+    if params['n_div']['linear'] > 0:
+        structure = "L=%i_%i-param" % (params['n_div']['linear'], params['line_params']) 
+    elif params['n_div']['circular'] > 0:
+        structure = "C=%i" % (params['n_div']['circular'],)
+    else:
+        raise ValueError("Must have either linear or circular divisions for simple_experiments.")
+    test_string = "%s_%s" % (test_image, structure)
+    param_string = "_".join([fill(param_name, param_value) for param_name, param_value in params.items() if param_name in param_abbrevs and
+                             fill(param_name, param_value) is not None])
+    n_trials_string = "trial=%i" % (trial_ind,)
+    
+    return f"{test_string}__{param_string}__{n_trials_string}.pkl"
+
+
+def run_trial(test_params, trial_ind, const_params):
+    print(f"\n\n\nRunning trial {trial_ind} with test params: {test_params}\n\n\n")
+    params = const_params.copy()
+    params.update(test_params)
+    # Simulate some processing
+    test_image = params['_test_image']
+    
+    
+    del params['_image_file']
+    del params['_test_image']
+    del params['_model_file']
+    params['nogui'] = True
+    
+    params_cache_file = os.path.join(trial_cache_dir, params_to_cache_filename(params, test_image, trial_ind))
+    if not os.path.exists(params_cache_file):
+        print(f"Cache file not found: {params_cache_file}, running trial...")
+    
+        uid = UIDisplay(image_file=None, model_file=None, synth_image_name=test_image, verbose=VERBOSE, **params)
+        loss, image = uid.run()
+        train_image = uid.get_train_image()
+        
+        with open(params_cache_file, "wb") as f:
+            pickle.dump( (loss, image, train_image), f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Saved trial results to {params_cache_file}")
+        
+    else:
+        print(f"Cache file found: {params_cache_file}, loading trial...")
+        with open(params_cache_file, "rb") as f:
+            loss, image, train_image = pickle.load(f)
+            print(f"Loaded trial results from {params_cache_file}")    
+        
+    return {'test_params': test_params, 'trial_ind': trial_ind, 'loss': loss, 'image': image, 'train_image': train_image}
+
+
 COMMON_PARAMS_stochastic = {'_image_file': None,
               '_model_file': None,
               'batch_size': 8,
@@ -424,11 +486,11 @@ def run_experiment_circles(test_image, n_circles, n_cpu = 12, n_trials = 15, sav
     print("N_CIRCLES = %i  -->  USING %i STRUCTURE AND HIDDEN NEURONS" % (n_circles, n_neurons))
     
     # DEBUG, for faster running:
-    # params['epochs_per_cycle'] = 25
+    # params['epochs_per_cycle'] = 3
     # params['run_cycles'] = 1
     # params['learning_rate_final'] = 1.0
     # n_trials=5
-    # var_param_values = var_param_values[:5]
+    # var_param_values = var_param_values[:2]
 
     exp_name = "test_%s_Circles=%i" % (test_image, n_circles)
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)

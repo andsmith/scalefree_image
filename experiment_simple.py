@@ -395,22 +395,24 @@ COMMON_PARAMS = {'_image_file': None,
               
     }
 
-def run_experiment_circles(n_cpu = 14, n_trials = 20):
+def run_experiment_circles(n_cpu = 14, n_trials = 10):
     params = COMMON_PARAMS.copy()   
-    # Custom for this experiment:
+    
+    # Custom for this experiment but constant:
     params['n_div'] = {'circular': 2, 'linear': 0, 'sigmoid': 0}
     params['_test_image'] = 'circles_2_rand'
+    
     # varying parameters:
     var_param_names = ['grad_sharpness' ]
-    var_param_values = [[1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 15.0, 20.0, 30.0]]
+    var_param_values = [[1.0, 2.0, 3.0, 4.0, 5.0, 10.0]]
     
     # DEBUG, for faster running:
-    params['epochs_per_cycle'] = 25
-    params['run_cycles'] = 1
-    params['learning_rate_final'] = 1.0
-    n_trials=5
-    var_param_values = var_param_values[:5]
-    load=False  # False to recalculate debug data, True to load it
+    # params['epochs_per_cycle'] = 25
+    # params['run_cycles'] = 1
+    # params['learning_rate_final'] = 1.0
+    # n_trials=5
+    # var_param_values = var_param_values[:5]
+    load = False  # False to recalculate debug data, True to load it
     
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, name = "circle_grad_sharpness_test")
     experiment.run(n_cpu=n_cpu,load=load)
@@ -418,22 +420,23 @@ def run_experiment_circles(n_cpu = 14, n_trials = 20):
     experiment.plot()   
     plt.show()
     
-def run_experiment_lines(n_cpu = 14, n_trials = 20):
+def run_experiment_lines(n_cpu = 14, n_trials = 10):
     params = COMMON_PARAMS.copy()
-    params['n_div'] = {'circular': 0, 'linear': 2, 'sigmoid': 0}
     
+    params['n_div'] = {'circular': 0, 'linear': 2, 'sigmoid': 0}
     params['_test_image'] = 'lines_2_rand'
+    
     var_param_names = ['grad_sharpness', 'line_params']
-    var_param_values = [[1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0], [ 2, 3]]  #  
+    var_param_values = [[1.0, 2.0, 3.0, 5.0, 10.0], [ 2, 3]]  #  
     
     # DEBUG, for faster running:
-    params['epochs_per_cycle'] = 10
-    params['run_cycles'] = 2
-    params['learning_rate_final'] = 0.1
-    n_trials=3
-    var_param_values[0] = var_param_values[0][:2]  # Just shorten this one.
+    # params['epochs_per_cycle'] = 10
+    # params['run_cycles'] = 2
+    # params['learning_rate_final'] = 0.1
+    # n_trials=3
+    # var_param_values[0] = var_param_values[0][:2]  # Just shorten this one.
     
-    load=True  # False to recalculate debug data, True to load it
+    load=False  # False to recalculate debug data, True to load it
     
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, name = "line_params_2_or_3_test")
     experiment.run(n_cpu=n_cpu,load=load)        
@@ -446,5 +449,5 @@ def run_experiment_lines(n_cpu = 14, n_trials = 20):
     
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    # run_experiment_circles()
+    run_experiment_circles()
     run_experiment_lines()

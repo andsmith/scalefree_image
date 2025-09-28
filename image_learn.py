@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import json
 from skimage import measure
 import matplotlib.gridspec as gridspec
+from synth_image import TestImageMaker
 from copy import deepcopy
 
 
@@ -41,7 +42,7 @@ class ScaleInvariantImage(object):
     """
 
     def __init__(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
-                 learning_rate_initial=0.1, downscale=1.0, center_weight_params=None, **kwargs):
+                 learning_rate_initial=0.1, downscale=1.0, center_weight_params=None, line_params=3, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
@@ -59,6 +60,7 @@ class ScaleInvariantImage(object):
 
         """
         self.image_raw = image_raw
+        self._line_params = line_params
         self.n_hidden = n_hidden
         self.n_div = n_div
         self.n_structure = n_structure
@@ -241,7 +243,8 @@ class ScaleInvariantImage(object):
                     output_image[:, :, c] = (output_image[:, :, c] - c_min) / (c_max - c_min)
                         
             image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
-            img_ax.imshow(output_image if output_image is not None else self.image_train, extent=image_extent)
+            image = output_image if output_image is not None else self.image_train
+            img_ax.imshow(image, extent=image_extent)
         #ax.invert_yaxis()
 
         params = self.get_div_params()
@@ -251,25 +254,27 @@ class ScaleInvariantImage(object):
                 centers = params['linear']['centers'].reshape(-1,2)  # switch to (x,y)
                 # FLIP Y for display
                 #centers = centers[:,::-1]
-                #centers[:,1] = -centers[:,1]
-                angles = params['linear']['angles']
+                centers[:,1] = -centers[:,1]
+                #angles = params['linear']['angles']
+                # rotate for display
+                #angles = np.pi/2.0 - angles  
                 if len(self._artists['linear']['center_points']) == 0:
                     self._artists['linear']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
                                                                         'o', color='red', markersize=4, alpha=0.5)[0])
                 else:
                     self._artists['linear']['center_points'][0].set_data(centers[:,0], centers[:,1])
 
-                for i in range(self.n_div['linear']):
-                    c = centers[i]
-                    a = angles[i]
-                    line_len = 3.0
-                    dx = np.cos(a) * line_len
-                    dy = np.sin(a) * line_len
-                    if len(self._artists['linear']['lines']) <= i:
-                        line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='red', alpha=0.5)
-                        self._artists['linear']['lines'].append(line)
-                    else:
-                        self._artists['linear']['lines'][i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy])
+                # for i in range(self.n_div['linear']):
+                #     c = centers[i]
+                #     a = angles[i]
+                #     line_len = 3.0
+                #     dx = np.cos(a) * line_len
+                #     dy = np.sin(a) * line_len
+                #     if len(self._artists['linear']['lines']) <= i:
+                #         line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='red', alpha=0.5)
+                #         self._artists['linear']['lines'].append(line)
+                #     else:
+                #         self._artists['linear']['lines'][i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy])
 
             elif 'offsets' in params['linear']:
                 # 2 parameterization of the line (angle, offset from origin)
@@ -296,7 +301,8 @@ class ScaleInvariantImage(object):
                     else:
                         self._artists['linear']['lines'][l_i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy]
                                                                       )
-        if 'circles' in params:
+        if 'circular' in params:
+            
             centers = params['circular']['centers']# switch to (x,y)
             centers[:,1] = -centers[:,1]
             radii = params['circular']['radii']
@@ -358,6 +364,7 @@ class ScaleInvariantImage(object):
             output (3)
 
         """
+        PAR_TYPES = {2: '2_param', 3: '3_param'}
 
         # Input is just the (x,y) pixel coordinates (scaled)
         input = Input((2,))
@@ -365,8 +372,9 @@ class ScaleInvariantImage(object):
         div_layers = []
         for div_type, n_div in self.n_div.items():
             if n_div > 0:
+                extra_kwargs = {} if div_type != 'linear' else {'parameterization':PAR_TYPES[self._line_params]}
                 layer = DIV_TYPES[div_type](n_div, sharpness=self.sharpness,
-                                            grad_sharpness=self.grad_sharpness, name="%s_div_layer" % (div_type,))(input)
+                                            grad_sharpness=self.grad_sharpness, name="%s_div_layer" % (div_type,), **extra_kwargs)(input)
                 div_layers.append(layer)
         if len(div_layers) == 0:
             raise Exception("Need at least one division unit (circular, linear, or sigmoid).")
@@ -510,8 +518,9 @@ class UIDisplay(object):
     _CUSTOM_LAYERS = {'CircleLayer': CircleLayer, 'LineLayer': LineLayer, 'NormalLayer': NormalLayer}
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
-    def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None,
-                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, **kwargs):
+    def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
+                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, 
+                 synth_image_name = None, **kwargs):
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
@@ -522,6 +531,7 @@ class UIDisplay(object):
         self._update_plots = False
         self._run_cycles = run_cycles
         self._shutdown = False
+        self._line_params = line_params
         self._frame_dir = frame_dir
         self._cycle = 0  # epochs_per_cycle epochs of training and an output update increments this
         self._annotate = False
@@ -535,6 +545,7 @@ class UIDisplay(object):
         self._batch_size = batch_size
         self._nogui = nogui
         self._metadata = []
+        self.final_loss = None
         if learning_rate_final is not None:
             if learning_rate_final < 0:
                 raise Exception("Final learning rate must be non-negative for annealing.")
@@ -548,19 +559,11 @@ class UIDisplay(object):
                 self._learning_rate_decay = 0.0
         else:
             self._learning_rate_decay = None
-
-        if not os.path.exists(image_file):
-            raise Exception("Image file doesn't exist:  %s" % (image_file,))
-
-        self._image_raw = cv2.imread(image_file)[:, :, ::-1]
-
-        logging.info("Loaded image %s with shape %s." %
-                     (image_file, self._image_raw.shape))
-        # model/image file prefix is the image bare name without extension
-        self._file_prefix = os.path.basename(os.path.splitext(os.path.basename(image_file))[0])
-
+            
+        self._image_raw, self._file_prefix = self._set_image(image_file, synth_image_name)
+        
         self._sim = ScaleInvariantImage(n_div=self.n_div, n_hidden=n_hidden, n_structure=n_structure, learning_rate_initial=self._learn_rate,
-                                        batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, 
+                                        batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, line_params=self._line_params,
                                         downscale=self._downscale, center_weight_params=self._center_weight_params, **kwargs)
 
         # Check for metadata file
@@ -590,6 +593,33 @@ class UIDisplay(object):
         self._frame = None
 
         self._just_image = just_image
+        
+    def _set_image(self, img_filename, synth_name, image_size_wh = (64, 48)):
+        """
+        disambiguate, load  / generate image
+        :param img_filename: path to image file
+        :param synth_name: name of the synthetic image type to generate, or None
+        :param image_size_wh: size of synthetic image to generate (width, height)
+        """
+        if synth_name is not None:
+            image_maker = TestImageMaker(image_size_wh)
+            print("Making:", synth_name)
+            image_raw = image_maker.make_image(synth_name)
+            file_prefix = "SYNTH_%s" % (synth_name,)
+            logging.info("Generated synthetic image type %s with shape %s, using prefix %s" %
+                         (synth_name, image_raw.shape, file_prefix))
+        else:
+            
+            if not os.path.exists(img_filename):
+                raise Exception("Image file doesn't exist:  %s" % (img_filename,))
+            image_raw = cv2.imread(img_filename)[:, :, ::-1]
+
+            # model/image file prefix is the image bare name without extension
+            file_prefix = os.path.basename(os.path.splitext(os.path.basename(img_filename))[0])
+            logging.info("Loaded image %s with shape %s, using save_prefix %s" %
+                        (img_filename, image_raw.shape, file_prefix))
+
+        return image_raw, file_prefix
 
     def _get_arch_str(self):
         """
@@ -669,7 +699,7 @@ class UIDisplay(object):
             self._metadata.append(init_meta)
             self._write_metadata()
 
-
+        loss = None
         while (max_iter==0 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
@@ -677,8 +707,8 @@ class UIDisplay(object):
                          (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
 
             new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate)
+            
             self._l_rate_history.append(self._learn_rate)
-
             self._loss_history.append(new_losses)
 
             # self._save_state()
@@ -712,7 +742,8 @@ class UIDisplay(object):
             logging.info("To make a movie from the images, try:")
             logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
                          (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
-
+        self.final_loss = loss
+    
     def _gen_image(self, shape=None):
         if shape is None:
             train_shape = self._sim.image_train.shape
@@ -776,8 +807,11 @@ class UIDisplay(object):
             self._update_plots = True
         else:
             logging.info("Unassigned key: %s" % (event.key,))
+        
+    def get_train_image(self):
+        return self._sim.image_train
 
-    def run(self, debug_nothread=False):
+    def run(self, debug_epochs_nothread=0):
         """
         Run as interactive matplotlib window, updating when new image is available.
            * left is the current training image
@@ -790,9 +824,9 @@ class UIDisplay(object):
             self._write_image(img, filename = self._just_image)
             return
         
-        if debug_nothread:
+        if debug_epochs_nothread>0:
             logging.info("Debug mode, running training in main thread.")
-            #self._train_thread(max_iter = 1)  # for debugging, don't start thread, just run in here
+            loss = self._train_thread(max_iter = debug_epochs_nothread)
             self._output_image = self._gen_image()
             fig, ax = plt.subplots(1,1)
             self._sim.draw_div_units(ax=ax, output_image=self._output_image)
@@ -808,7 +842,7 @@ class UIDisplay(object):
             logging.info("No GUI mode, waiting for training to finish...")
             if self._worker is not None:
                 self._worker.join()
-            return
+            return self.final_loss, self._output_image
 
         while self._sim.image_train is None:
             time.sleep(0.05)
@@ -1011,6 +1045,8 @@ class UIDisplay(object):
             self._worker.join(timeout=5.0)
         plt.ioff()
         plt.show()  # Keep the final plot visible
+        
+        return self.final_loss, self._output_image
 
 
 def get_args():
@@ -1019,8 +1055,12 @@ def get_args():
     parser = argparse.ArgumentParser(description="Learn an image.",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-i", "--input_image", help="image to transform", type=str, default=None)
+    parser.add_argument("--test_image", help="Which test image to use (internally generated, overrides --input_image)", type=str, default=None)
+    
     parser.add_argument("-c", "--circles", help="Number of circular division units.", type=int, default=0)
     parser.add_argument("-l", "--lines", help="Number of linear division units.", type=int, default=0)
+    parser.add_argument("-lp", "--lines_params", help="specify 2 or 3. (2 means lines are parameterized by angle and distance from origin,"+
+                                                     "3 means lines are parameterized by angle and intercept / center point).", type=int, default=3)
     parser.add_argument("-s", "--sigmoids", help="Number of sigmoid division units.", type=int, default=0)
     parser.add_argument("-t", "--structure_units", help="Size of structure layer (before color layer), default 0 (no structure layer)"
                         , type=int, default=0)
@@ -1060,7 +1100,7 @@ def get_args():
                      'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
     # print("CENTER WEIGHT PARAMS:  ", center_weight)
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
-              'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,
+              'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
@@ -1071,7 +1111,14 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     parsed, kwargs = get_args()
 
-    if parsed.input_image is None and parsed.model_file is None:
+    if parsed.input_image is None and parsed.model_file is None and parsed.test_image is None:
         raise Exception("Need input image (-i) to start training, or model file (-m) to continue.")
-    s = UIDisplay(image_file=parsed.input_image, state_file=parsed.model_file, **kwargs)
+    import pprint
+    print_args = kwargs.copy()
+    print_args['_image_file'] = parsed.input_image
+    print_args['_model_file'] = parsed.model_file
+    print_args['_test_image'] = parsed.test_image
+    pprint.pprint(print_args)
+
+    s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file, **kwargs)
     s.run()

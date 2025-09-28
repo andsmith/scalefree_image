@@ -15,9 +15,8 @@ class InitRadiiRandom(Initializer):
         pass
 
     def __call__(self, shape, dtype=None, **kwargs):
-        spread = [1.5, 1.5]
-        sigmas = (np.random.rand(self._num) ** 1.0 - spread[0]) * (spread[1] - spread[0])
-        sigmas = np.clip(sigmas, spread[0], spread[1])
+        spread = [0.3, .7]
+        sigmas = np.random.rand(self._num) * (spread[1] - spread[0]) + spread[0]
         log_sigmas = np.log(sigmas)
         return log_sigmas
 
@@ -34,7 +33,7 @@ class CircleLayer(Layer):
         self.grad_sharpness = grad_sharpness
 
         if not initializer:
-            self.initializer = RandomUniform(-1.0, 1.0)
+            self.initializer = RandomUniform(-.8, .8)
         else:
             self.initializer = initializer
         self.centers = None

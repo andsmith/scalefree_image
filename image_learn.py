@@ -520,7 +520,8 @@ class UIDisplay(object):
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, 
-                 synth_image_name = None, **kwargs):
+                 synth_image_name = None,verbose=True, **kwargs):
+        self._verbose = verbose
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
@@ -706,7 +707,7 @@ class UIDisplay(object):
             logging.info("Training batch_size: %i, cycle: %i of %i, learning_rate: %.6f" %
                          (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
 
-            new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate)
+            new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
             
             self._l_rate_history.append(self._learn_rate)
             self._loss_history.append(new_losses)

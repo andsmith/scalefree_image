@@ -6,15 +6,17 @@ import logging
 from multiprocessing import Pool, cpu_count
 import os
 import pickle
+import os
 import matplotlib.pyplot as plt
 from util import draw_bbox
 import matplotlib.gridspec as gridspec
 import cv2
 NEON_GREEN = (57, 255, 20)
 
-def run_trial(test_params, trial_ind, const_params):
+VERBOSE=False
 
-    logging.info(f"\n\n\nRunning trial {trial_ind} with test params: {test_params}\n\n\n")
+def run_trial(test_params, trial_ind, const_params):
+    print(f"\n\n\nRunning trial {trial_ind} with test params: {test_params}\n\n\n")
     params = const_params.copy()
     params.update(test_params)
     # Simulate some processing
@@ -23,7 +25,7 @@ def run_trial(test_params, trial_ind, const_params):
     del params['_test_image']
     del params['_model_file']
     params['nogui'] = True
-    uid = UIDisplay(image_file=None, model_file=None, synth_image_name=test_image, **params)
+    uid = UIDisplay(image_file=None, model_file=None, synth_image_name=test_image, verbose=VERBOSE, **params)
     loss, image = uid.run()
     return {'test_params': test_params, 'trial_ind': trial_ind, 'loss': loss, 'image': image, 'train_image': uid.get_train_image()}
 
@@ -46,10 +48,10 @@ class Experiment(object):
     value stored in self.stats.
     
     """
-    def __init__(self, const_params, var_param_names, var_param_values, n_trials=10,name=None):
+    def __init__(self, const_params, var_param_names, var_param_values, n_trials, cache_prefix):
         self.const_params = const_params
         self.var_param_names = var_param_names
-        self._name = name
+        self._cache_prefix = cache_prefix
         self.var_param_values = var_param_values
         self.results_raw = None
         self.stats=None
@@ -77,12 +79,13 @@ class Experiment(object):
         logging.info(f"Generated {len(work)} total trials ({len(param_combos)} parameter combinations, {self.n_trials} trials each)")
         return work
     
-    def run(self, n_cpu = 10, load=False):
+    def run(self, force_recompute=False, n_cpu = 10):
         """
         run on n_cpus in parallel, or if n=1, run serially. (0=all available)
         """
-        raw_filename ="%s_tests_results.pkl" % (self._name,) if self._name is not None else "test_results.pkl"
-        if not load:
+        raw_filename ="%s_tests_results.pkl" % (self._cache_prefix,)
+        if force_recompute or not os.path.exists(raw_filename):
+            logging.info(f"Raw results file not found:  {raw_filename}, starting new trials....")
             if n_cpu == 1:  
                 self.results_raw = [run_trial(combo, trial_ind, const_pars) for combo, trial_ind, const_pars in self.trials]
             else:
@@ -95,13 +98,12 @@ class Experiment(object):
                 pickle.dump(self.results_raw, f)
                 logging.info(f"Saved raw results to {raw_filename}")
         else:
+            logging.info(f"Raw results file found:  {raw_filename}, loading it....")
             # To load raw results:
             with open(raw_filename, "rb") as f:
                 self.results_raw = pickle.load(f)
                 logging.info(f"Loaded raw results from {raw_filename}")
             self._process_results()
-                
-                
         self._process_results()
         
         
@@ -210,7 +212,8 @@ class Experiment(object):
             Write in the lower-left corner of the image.
             """
                 
-            cv2.putText(img, caption, (indent, img.shape[0] - indent), cv2.FONT_HERSHEY_SIMPLEX, 1., (0,0,0), 1, cv2.LINE_AA)
+            cv2.putText(img, caption, (indent, img.shape[0] - indent), cv2.FONT_HERSHEY_SIMPLEX, 1., (0,0,0), 3, cv2.LINE_AA)
+            cv2.putText(img, caption, (indent, img.shape[0] - indent), cv2.FONT_HERSHEY_SIMPLEX, 1., NEON_GREEN, 1, cv2.LINE_AA)
             return img
         
         def _add_inset(big_img, small_img, upscale=1.0, train_upscale=1.0):
@@ -232,17 +235,21 @@ class Experiment(object):
             
             return big_img
         
-        best_img = _add_inset(best['image'].copy(), best['train_image'], upscale=2.0, train_upscale=1.5)
-        worst_img = _add_inset(worst['image'].copy(), worst['train_image'], upscale=2.0, train_upscale=1.5)
-        med_image = _add_inset(med['image'].copy(), med['train_image'], upscale=2.0, train_upscale=1.5)
+        best_img = _add_inset(best['image'].copy(), best['train_image'], upscale=2.5, train_upscale=1.5)
+        worst_img = _add_inset(worst['image'].copy(), worst['train_image'], upscale=2.5, train_upscale=1.5)
+        med_image = _add_inset(med['image'].copy(), med['train_image'], upscale=2.5, train_upscale=1.5)
         blank = np.zeros_like(best_img) + 255
+        sep_space = 20
+        h_sep = np.zeros((best_img.shape[0], sep_space, 3), dtype=best_img.dtype) + 255
+        v_sep = np.zeros((sep_space, best_img.shape[1]*2 + sep_space, 3), dtype=best_img.dtype) + 255
         collage = np.vstack([
-            np.hstack([_add_caption(med_image, "Median L: %.4f" % med['loss']), _add_caption(best_img, "Best L: %.4f" % best['loss'])]),
-            np.hstack([blank, _add_caption(worst_img, "Worst L: %.4f" % worst['loss'])])
+            np.hstack([_add_caption(med_image, "Median L: %.4f" % med['loss']), h_sep, _add_caption(best_img, "Best L: %.4f" % best['loss'])]),
+            v_sep,
+            np.hstack([blank, h_sep, _add_caption(worst_img, "Worst L: %.4f" % worst['loss'])])
         ])
         return collage
 
-    def plot(self):
+    def plot(self, fig_size=(12, 8)):
         """
         Plot the results for a single parameter sweep.
         For the N values, plot N columns:
@@ -269,8 +276,8 @@ class Experiment(object):
             n_rows = len(self.var_param_values[1]) 
             n_cols = len(self.var_param_values[0]) 
             # make room at top and on left for labels
-            grid = gridspec.GridSpec(n_rows, n_cols, wspace=0.4, hspace=0.4, top=0.85, left=0.15)
-            fig = plt.figure()
+            grid = gridspec.GridSpec(n_rows, n_cols, wspace=0.2, hspace=0.2, top=0.85, left=0.152, bottom=0.01, right=0.99)
+            fig = plt.figure(figsize=fig_size)
             axes_by_col = []
             for col, val1 in enumerate(self.var_param_values[0]):
                 axes_by_col.append([])
@@ -299,14 +306,14 @@ class Experiment(object):
                     
                 # Write the column headers using annotations above the top row of images
                 ax = axes_by_col[-1][0]
-                ax.annotate(f"{self.var_param_names[0]} = {val1}", xy=(0.5, 1.2), xycoords='axes fraction', ha='center', fontsize=12)
+                ax.annotate(f"{self.var_param_names[0]} = {val1}", xy=(0.5, 1.2), xycoords='axes fraction', ha='center', fontsize=14)
                 ax.axis('off')
                 
                 # Write the row headers using annotations to the left of the leftmost column of images
                 for row, val2 in enumerate(self.var_param_values[1]):
                     ax = axes_by_col[0][row]
-                    ax.annotate(f"{self.var_param_names[1]} = {val2}", xy=(-0.3, 0.5), xycoords='axes fraction', ha='center',
-                                fontsize=12, rotation=90, rotation_mode='anchor')
+                    ax.annotate(f"{self.var_param_names[1]} = {val2}", xy=(-0.25, 0.5), xycoords='axes fraction', ha='center',
+                                fontsize=14, rotation=90, rotation_mode='anchor')
                     ax.axis('off')
         
 
@@ -316,11 +323,14 @@ class Experiment(object):
                                                                      self.var_param_names[1], var_str_2)
             #title += f"each experiment over {self.n_trials} trials, green insets show training image."
             plt.suptitle(title, fontsize=16)
+            
+
         elif len(self.var_param_names) == 1:
             
             # Create a figure with subplots
-            if len(self.var_param_values[0]) > 3:
-                n_rows = np.ceil(len(self.var_param_values[0])/3).astype(int)
+            n_cols=3
+            if len(self.var_param_values[0]) > n_cols:
+                n_rows = np.ceil(len(self.var_param_values[0])/n_cols).astype(int)
                 n_cols = np.ceil(len(self.var_param_values[0])/n_rows).astype(int)
                 fig, axs = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=(13, 8.5))
                 axs = axs.flatten()
@@ -351,8 +361,8 @@ class Experiment(object):
                 axs[col].imshow(result_img)
 
                 best_loss = self.stats[col]['losses'][self.stats[col]['best_ind']]
-                axs[col].set_title(f"{self.var_param_names[0]} = {param_value}\n"
-                                    f"  mean loss = {self.stats[col]['mean_loss']:.5f}")
+                axs[col].set_title(f"{self.var_param_names[0]} = {param_value}:  "
+                                    f"mean loss = {self.stats[col]['mean_loss']:.5f}", fontsize=12)
                 axs[col].axis('off')
             # turn off unused axes
             for ax in axs[len(self.var_param_values[0]):]:
@@ -363,7 +373,9 @@ class Experiment(object):
                          , fontsize=17)
             plt.tight_layout()
             
-            
+        return fig      
+    
+    
 def get_var_str(values):
 
     if isinstance(values[0], float):
@@ -375,9 +387,9 @@ def get_var_str(values):
 
     return par_val_str
 
-COMMON_PARAMS = {'_image_file': None,
+COMMON_PARAMS_stochastic = {'_image_file': None,
               '_model_file': None,
-              'batch_size': 4,
+              'batch_size': 8,
               'border': 0.0,
               'center_weight_params': None,
               'display_multiplier': 5.0,
@@ -387,7 +399,7 @@ COMMON_PARAMS = {'_image_file': None,
               'learning_rate': 1.0,
               'learning_rate_final': 0.001,
               'epochs_per_cycle': 100,
-              'run_cycles': 4,
+              'run_cycles': 5,
               'sharpness': 1000.0,
               'n_hidden': 5,
               'n_structure': 5,
@@ -395,16 +407,21 @@ COMMON_PARAMS = {'_image_file': None,
               
     }
 
-def run_experiment_circles(n_cpu = 14, n_trials = 10):
-    params = COMMON_PARAMS.copy()   
+def run_experiment_circles(test_image, n_circles, n_cpu = 12, n_trials = 15, save_fig=True):
+    params = COMMON_PARAMS_stochastic.copy()   
     
     # Custom for this experiment but constant:
-    params['n_div'] = {'circular': 2, 'linear': 0, 'sigmoid': 0}
-    params['_test_image'] = 'circles_2_rand'
+    params['n_div'] = {'circular': n_circles, 'linear': 0, 'sigmoid': 0}
+    params['_test_image'] = test_image
     
     # varying parameters:
     var_param_names = ['grad_sharpness' ]
-    var_param_values = [[1.0, 2.0, 3.0, 4.0, 5.0, 10.0]]
+    var_param_values = [[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0]] 
+    n_neurons = (n_circles) * (n_circles +1) //2 + n_circles + int(np.ceil(n_circles/2)) 
+
+    params['n_structure'] = n_neurons
+    params['n_hidden'] = n_neurons
+    print("N_CIRCLES = %i  -->  USING %i STRUCTURE AND HIDDEN NEURONS" % (n_circles, n_neurons))
     
     # DEBUG, for faster running:
     # params['epochs_per_cycle'] = 25
@@ -412,42 +429,82 @@ def run_experiment_circles(n_cpu = 14, n_trials = 10):
     # params['learning_rate_final'] = 1.0
     # n_trials=5
     # var_param_values = var_param_values[:5]
-    load = False  # False to recalculate debug data, True to load it
+
+    exp_name = "test_%s_Circles=%i" % (test_image, n_circles)
+    experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
+    experiment.run(n_cpu=n_cpu)
+    fig = experiment.plot(fig_size=(9,12))
+    if not save_fig:
+        plt.show()
+    else:
+        # Save the figure
+        fig_filename = "%s_results.png" % (exp_name,)
+        fig.savefig(fig_filename, dpi=300)
+        logging.info(f"Saved figure to {fig_filename}")
     
-    experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, name = "circle_grad_sharpness_test")
-    experiment.run(n_cpu=n_cpu,load=load)
-    print("\n\n\n\nExperiment results summary:")
-    experiment.plot()   
-    plt.show()
+# BATCH version:    
+# COMMON_PARAMS_BATCH = COMMON_PARAMS_stochastic.copy()
+# COMMON_PARAMS_BATCH.update({'batch_size': 4096,
+#                      'epochs_per_cycle': 1000,
+#                      'run_cycles': 4})
+
+
+def run_experiment_lines(test_image, line_params, n_lines, n_cpu = 12, n_trials = 15, save_fig=True):
+    params = COMMON_PARAMS_stochastic.copy()
     
-def run_experiment_lines(n_cpu = 14, n_trials = 10):
-    params = COMMON_PARAMS.copy()
+    params['n_div'] = {'circular': 0, 'linear': n_lines, 'sigmoid': 0}
+    params['_test_image'] = test_image
+    params['line_params'] = line_params
+    n_neurons = (n_lines) * (n_lines +1) //2 + n_lines + int(np.ceil(n_lines/2))
+    params['n_structure'] = n_neurons
+    params['n_hidden'] = n_neurons
+
+    print("N_LINES = %i  ->  USING %i STRUCTURE AND HIDDEN NEURONS" % (n_lines, n_neurons))
     
-    params['n_div'] = {'circular': 0, 'linear': 2, 'sigmoid': 0}
-    params['_test_image'] = 'lines_2_rand'
     
-    var_param_names = ['grad_sharpness', 'line_params']
-    var_param_values = [[1.0, 2.0, 3.0, 5.0, 10.0], [ 2, 3]]  #  
+    var_param_names = ['grad_sharpness']
+    var_param_values = [[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0]]
     
     # DEBUG, for faster running:
-    # params['epochs_per_cycle'] = 10
+    # params['epochs_per_cycle'] = 100
     # params['run_cycles'] = 2
     # params['learning_rate_final'] = 0.1
     # n_trials=3
     # var_param_values[0] = var_param_values[0][:2]  # Just shorten this one.
     
-    load=False  # False to recalculate debug data, True to load it
-    
-    experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, name = "line_params_2_or_3_test")
-    experiment.run(n_cpu=n_cpu,load=load)        
-    experiment.plot()
+    exp_name = "test_%s_NP=%i_Lines=%i" % (test_image, line_params, n_lines)
+    experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
+    experiment.run(n_cpu=n_cpu)
+    fig = experiment.plot()
+    if not save_fig:
+        plt.show()
+    else:
+        # Save the figure
+        fig_filename = "%s_results.png" % (exp_name,)
+        fig.savefig(fig_filename, dpi=300)
+        logging.info(f"Saved figure to {fig_filename}")
 
-    plt.show()
+
+def run_experiments():
     
+    run_experiment_circles(n_circles = 1, test_image = 'circle_center')
+    run_experiment_circles(n_circles = 2, test_image = 'circles_2_rand')
+    run_experiment_circles(n_circles = 3, test_image = 'circles_3_rand')
+    run_experiment_circles(n_circles = 4, test_image = 'circles_4_rand')
+    
+    run_experiment_lines(line_params=2, n_lines=1, test_image = 'line_rand')
+    run_experiment_lines(line_params=2, n_lines=2, test_image = 'lines_2_rand')
+    run_experiment_lines(line_params=2, n_lines=3, test_image = 'lines_3_rand')
+    run_experiment_lines(line_params=2, n_lines=4, test_image = 'lines_4_rand')
+    
+    run_experiment_lines(line_params=3, n_lines=1, test_image = 'line_rand')
+    run_experiment_lines(line_params=3, n_lines=2, test_image = 'lines_2_rand')
+    run_experiment_lines(line_params=3, n_lines=3, test_image = 'lines_3_rand')
+    run_experiment_lines(line_params=3, n_lines=4, test_image = 'lines_4_rand')
+
     
     
     
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    run_experiment_circles()
-    run_experiment_lines()
+    run_experiments()

@@ -8,12 +8,13 @@ import os
 import pickle
 import os
 import matplotlib.pyplot as plt
+
 from util import draw_bbox
 import matplotlib.gridspec as gridspec
 import cv2
 import json
-NEON_GREEN = (57, 255, 20)
-
+GREEN = (0, 255, 0)
+RED = (255, 0, 0)
 VERBOSE=False
 
 trial_cache_dir = "trial_cache"
@@ -48,8 +49,10 @@ class Experiment(object):
         self.trials = self._gen_work()
         if not os.path.exists(trial_cache_dir):
             os.makedirs(trial_cache_dir)
-            
-            
+        # for rescoring outputs, R, G, and B must be within this fraction (out of  255) of
+        self._close_pixel_thresh = 0.05  # the training image to count as "close"
+        self._passing_score_thresh = 0.75  # fraction of pixels that must be close to count as passing the test.
+
     def _gen_work(self):
         """
         A work unit is 1 dict of test parameters, 1 trial index, and the constant parameters dict.
@@ -71,7 +74,7 @@ class Experiment(object):
         logging.info(f"Generated {len(work)} total trials ({len(param_combos)} parameter combinations, {self.n_trials} trials each)")
         return work
     
-    def run(self, force_recompute=False, n_cpu = 10):
+    def run(self, force_recompute=False, n_cpu = 12):
         """
         run on n_cpus in parallel, or if n=1, run serially. (0=all available)
         """
@@ -95,7 +98,8 @@ class Experiment(object):
             with open(raw_filename, "rb") as f:
                 self.results_raw = pickle.load(f)
                 logging.info(f"Loaded raw results from {raw_filename}")
-            self._process_results()
+            
+            #self._process_results()
         self._process_results()
         
         
@@ -141,7 +145,78 @@ class Experiment(object):
                 stat['sd_loss'] = None
             stats.append(stat)
         self.stats = stats
+
+    def _rescore_outputs(self, train_images, output_images, title, n_plot=0):
+        """
+        for each train/output pair:
+            Shrink the output iamge down to the train image size.
+            return the fraction of pixels whose R, G, and B values are within pct_thresh of the training image.
+        """
+        def get_close_pixels(train, output):
+            # Return fracction o f pixels within threshold, assume images are same size
+            diff = np.abs(output.astype(np.int16) - train.astype(np.int16))  # to avoid overflow
+            max_variance = self._close_pixel_thresh * 255
+            close_mask = (diff[:,:,0] <= max_variance) & (diff[:,:,1] <= max_variance) & (diff[:,:,2] <= max_variance)
+            return close_mask
+
+
         
+        scores = []
+        outputs_small = []
+        masks = []
+        print("Rescoring %i output images..." % len(output_images))
+        for train_image, output_image in zip(train_images, output_images):
+            if output_image.dtype in [np.float32, np.float64]:
+                output_image = np.clip(output_image*255.0, 0, 255).astype(np.uint8)
+            if train_image.dtype in [np.float32, np.float64]:
+                train_image = np.clip(train_image*255.0, 0, 255).astype(np.uint8)
+                
+            small_output = cv2.resize(output_image, (train_image.shape[1], train_image.shape[0]), interpolation=cv2.INTER_AREA)
+            close_mask = get_close_pixels(train_image, small_output)
+            score = np.sum(close_mask) / (close_mask.shape[0] * close_mask.shape[1])
+            
+            outputs_small.append(small_output)
+            scores.append(score)
+            masks.append(close_mask)
+            
+            print("Train mask shape: ", close_mask.shape, "out_small shape: ", small_output.shape, "score: %.4f" % score, 'loss', np.mean((small_output.astype(np.float32)-train_image.astype(np.float32))**2))
+
+        scores = np.array(scores)
+        
+        if n_plot>0:
+            """
+            Plot four rows, each pair of 2 rows of n_plot //2 images:
+            Top row:  training images
+            Bottom row:  output images with pixels within threshold highlighted in green.
+            """
+            
+            n_plot = min(n_plot, len(train_images), len(output_images))
+            n_rows = (n_plot//5)
+            n_cols = int(np.ceil(n_plot/n_rows))
+            fig, axs = plt.subplots(n_rows*2, n_cols, figsize=(15, 6))
+            for i in range(n_plot):
+                col = i // n_rows
+                row = (i % n_rows) * 2
+                train_img = train_images[i]
+                output_img = outputs_small[i]
+                shaded_img = output_img.copy()
+                bad_mask = ~masks[i]
+                alpha=0.5
+                shaded_img[masks[i], :] = alpha* shaded_img[masks[i], :]  + (1-alpha) * np.array(GREEN)
+                shaded_img[bad_mask, :] = alpha* shaded_img[bad_mask, :]  + (1-alpha) * np.array(RED)
+                collage = self.stack_images([train_img, output_img, shaded_img], sep_space=10)
+                axs[row, col].imshow(collage)
+                axs[row, col].set_title(f"Score: {scores[i]:.4f}")
+                axs[row, col].axis('off')
+            # Add spacing between rows
+            for ax in axs.flatten():
+                ax.axis('off')  
+            plt.suptitle(f"Rescoring outputs for {title}\npct_thresh={self._close_pixel_thresh*100:.1f}%", fontsize=16)
+            plt.tight_layout()
+            fig.subplots_adjust(wspace=0.0, hspace=0.1)
+            plt.show()
+        return scores
+
     def _process_results(self):
         """
         Create the stats structure from the raw results.
@@ -154,13 +229,19 @@ class Experiment(object):
                 # base case: return stats for this assignment
                 assigned_results = [r for r in self.results_raw if all(r['test_params'].get(k) == v for k, v in assignments.items())]
                 losses = np.array([r['loss'] for r in assigned_results])
+                output_images = [r['image'] for r in assigned_results]
                 train_images = [r['train_image'] for r in assigned_results]
+                assigned_str =", ".join([f"{k}={v}" for k, v in assignments.items()])
+                
+                new_scores = self._rescore_outputs(train_images, output_images, assigned_str)
                 n_trials = len(losses)
                 best_ind = np.argmin(losses) if n_trials > 0 else None
                 worst_ind = np.argmax(losses) if n_trials > 0 else None 
                 median_ind = np.argsort(losses)[n_trials // 2] if n_trials > 0 else None
                 return dict(n_trials = len(losses),
                     losses = losses,
+                    scores = new_scores,
+                    output_images = output_images,
                     train_images = train_images,
                     mean_loss = float(np.mean(losses)),
                     sd_loss = float(np.std(losses)),
@@ -183,8 +264,8 @@ class Experiment(object):
         self.stats = process_level({}, self.var_param_names)
         # import pprint
         # pprint.pprint(self.stats)
-        
-    def make_result_collage(self,best,worst,med):
+
+    def make_result_collage(self,best,worst,med,scores):
         """
         Stack the images, 2 by 2, 
         [[ median, best  ]
@@ -199,13 +280,29 @@ class Experiment(object):
         :return: collage image
         
         """
-        def _add_caption(img, caption, indent = 10):
+        def _add_caption(img, captions, indent = 10,font_scale=1.0, double_strike=True, thickness=2, spacing = 36, line_colors = None):
             """
             Write in the lower-left corner of the image.
             """
+            
+            captions = [captions] if isinstance(captions, str) else captions
+            
+            if line_colors is None:
+                line_colors = [None] * len(captions)
                 
-            cv2.putText(img, caption, (indent, img.shape[0] - indent), cv2.FONT_HERSHEY_SIMPLEX, 1., (0,0,0), 3, cv2.LINE_AA)
-            cv2.putText(img, caption, (indent, img.shape[0] - indent), cv2.FONT_HERSHEY_SIMPLEX, 1., NEON_GREEN, 1, cv2.LINE_AA)
+            line_colors = [((0,0,0) if c is None else c) for c in line_colors]
+            y = img.shape[0] - indent
+            for caption, color in zip(reversed(captions), reversed(line_colors)):
+                if double_strike:
+                    # Black out the background
+                    pad=5
+                    (w, h), b = cv2.getTextSize(caption, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+                    cv2.rectangle(img, (indent-pad, y - h-pad), (indent + w + pad, y+pad), (255,255,255), -1)
+                    #cv2.putText(img, caption, (indent, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,0,0), 5, cv2.LINE_AA)
+                    cv2.putText(img, caption, (indent, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
+                else:
+                    cv2.putText(img, caption, (indent, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+                y -= spacing
             return img
         
         def _add_inset(big_img, small_img, upscale=1.0, train_upscale=1.0):
@@ -220,24 +317,44 @@ class Experiment(object):
 
             big_img[2:2+small_img.shape[0], 2:2+small_img.shape[1], :] = small_img
             bbox = {'x':(1, 1+small_img.shape[1]+1), 'y':(1, 1+small_img.shape[0]+1)}
-            draw_bbox(big_img, bbox, color = NEON_GREEN, thickness=2)
+            draw_bbox(big_img, bbox, color = GREEN, thickness=2)
             
             if upscale>1.0:
                 big_img = cv2.resize(big_img, (0,0), fx=upscale, fy=upscale, interpolation=cv2.INTER_NEAREST)
             
             return big_img
+
+        n_passing = np.sum(scores >= self._passing_score_thresh)
         
         best_img = _add_inset(best['image'].copy(), best['train_image'], upscale=2.5, train_upscale=1.5)
         worst_img = _add_inset(worst['image'].copy(), worst['train_image'], upscale=2.5, train_upscale=1.5)
         med_image = _add_inset(med['image'].copy(), med['train_image'], upscale=2.5, train_upscale=1.5)
-        blank = np.zeros_like(best_img) + 255
-        sep_space = 20
-        h_sep = np.zeros((best_img.shape[0], sep_space, 3), dtype=best_img.dtype) + 255
-        v_sep = np.zeros((sep_space, best_img.shape[1]*2 + sep_space, 3), dtype=best_img.dtype) + 255
+        stats = 0 * best_img + 255
+        stats = _add_caption(stats, ["RGB 'close' thresh:",
+                                     "   %.1f%% " % (self._close_pixel_thresh*100,),
+                                     "Num close to pass:",
+                                     "   %.1f%%" % (self._passing_score_thresh*100,),
+                                     "",
+                                     "N passing: %i" % (n_passing, )], indent=20, font_scale=1.2,
+                                thickness=2,double_strike=False, spacing=42, line_colors = [None, None, None, None, None, RED])
+
+        collage = self.stack_images([_add_caption(med_image, "Median L: %.4f" % med['loss']),
+                                     _add_caption(best_img, "Best L: %.4f" % best['loss']),
+                                     _add_caption(worst_img, "Worst L: %.4f" % worst['loss']),
+                                     stats], sep_space=20)
+        
+        return collage
+    
+    def stack_images(self, image_list, sep_space=10):
+        blank = np.zeros_like(image_list[0]) + 255
+        while len(image_list) <4:
+            image_list.append(blank)
+        h_sep = np.zeros((image_list[0].shape[0], sep_space, 3), dtype=image_list[0].dtype) + 255
+        v_sep = np.zeros((sep_space, image_list[0].shape[1]*2 + sep_space, 3), dtype=image_list[0].dtype) + 255
         collage = np.vstack([
-            np.hstack([_add_caption(med_image, "Median L: %.4f" % med['loss']), h_sep, _add_caption(best_img, "Best L: %.4f" % best['loss'])]),
+            np.hstack([image_list[0], h_sep, image_list[1]]),
             v_sep,
-            np.hstack([blank, h_sep, _add_caption(worst_img, "Worst L: %.4f" % worst['loss'])])
+            np.hstack([image_list[2], h_sep, image_list[3]])
         ])
         return collage
 
@@ -289,7 +406,8 @@ class Experiment(object):
                     med = {'image':stat['median_image'],
                            'train_image':stat['train_images'][median_ind],
                            'loss':stat['losses'][median_ind]}
-                    result_img = self.make_result_collage(best, worst, med)
+                    scores = stat['scores']
+                    result_img = self.make_result_collage(best, worst, med, scores)
 
                     ax.imshow(result_img)
                     ax.set_title(f"mean={stat['mean_loss']:.6f}")
@@ -347,8 +465,8 @@ class Experiment(object):
                 med = {'image':self.stats[col]['median_image'],
                        'train_image':self.stats[col]['train_images'][median_ind],
                        'loss':self.stats[col]['losses'][median_ind]}
-
-                result_img = self.make_result_collage(best, worst, med)
+                scores = self.stats[col]['scores']
+                result_img = self.make_result_collage(best, worst, med, scores)
 
                 axs[col].imshow(result_img)
 
@@ -366,6 +484,67 @@ class Experiment(object):
             plt.tight_layout()
             
         return fig      
+    
+    def plot_summary(self, fig_size=(12, 5)):
+        """
+        Plot a summary of all experiments, this is the plot to make the recommendation clear, if the experiment is to have 
+        revealed anything at all.
+        
+        NOTE:  Not implemented for more than 1 experiment parameter.
+        
+        TITLE:   Data / network:  [test-img],  [circle/line] units:  [n],  color layers: [[n_structure] n_color]
+                 Training:  %i cycles, learning rates [%i down to %i], batch size %i, %i epochs/cycle.
+                 Exp param:  [param name] = {param values}
+                 Trials:  %i trials per parameter set.
+        left-plot: example training image 
+        right-plot:  Bar graph, number of passing trials for each parameter value.
+               Below that, a box plot of the losses for each parameter value.
+        :param fig_size:  (width, height) in inches
+        :return: figure
+        """
+        if len(self.var_param_names) > 1:
+            raise NotImplementedError("Currently only implemented for 1 varying parameter")
+        
+        var_param_name = self.var_param_names[0]
+        var_param_values = self.var_param_values[0]
+        
+        n_cols = len(var_param_values)
+        fig, axs = plt.subplots(nrows=1, ncols=2, figsize=fig_size,gridspec_kw={'width_ratios': [1, 5]})
+        
+        # training image:
+        axs[0].imshow(self.stats[0]['train_images'][0])
+        axs[0].set_title("Example training image\nTest name: %s" % (self.const_params['_test_image'],), fontsize=14)
+        axs[0].axis('off')
+        
+        
+        # Bar graph of number of passing trials
+        n_passing = [np.sum(stat['scores'] >= self._passing_score_thresh) for stat in self.stats]
+        axs[1].bar(range(n_cols), n_passing, color='skyblue')
+        axs[1].set_xticks(range(n_cols))
+        axs[1].set_xticklabels([str(v) for v in var_param_values])
+        axs[1].set_ylabel("Number of Passing Trials", fontsize=14)
+        axs[1].set_xlabel(f"{var_param_name}", fontsize=18)
+        axs[1].set_ylim(0, self.n_trials)
+        axs[1].set_title(f"Passing criterion:  at least {self._passing_score_thresh*100:.1f}% of pixels within {self._close_pixel_thresh*100:.1f}% of training image's RGB values.")
+        data_line = f"Test case:  {self.const_params['_test_image']}"
+        units_str = "Circle-units:  %i" % (self.const_params['n_div']['circular'],) if self.const_params['n_div']['circular'] > 0 else \
+                "Line-units:  %i  (%i param.)" % (self.const_params['n_div']['linear'], self.const_params['line_params'])
+        arch_str = f"Structure-units:  {self.const_params['n_structure']},  Color-units:  {self.const_params['n_hidden']}"
+        network_line = f"Network:  {units_str},  {arch_str}"
+        title = f"{data_line}\n{network_line}\n"
+        title += f"Training: batch size {self.const_params['batch_size']}, annealing {self.const_params['run_cycles']} cycles of {self.const_params['epochs_per_cycle']} epochs,"
+        title += f"learning-rate init={self.const_params['learning_rate']}, final={self.const_params['learning_rate_final']}\n"
+
+        title += f"Experimental param:  {var_param_name} = {get_var_str(var_param_values)}\n"
+        title += f"Num Trials:  {self.n_trials} per parameter value."
+        # make more room between axes
+        fig.subplots_adjust(wspace=0.4)
+        # move top of the bar graph down to make room for title
+        box = axs[1].get_position() # get the original position
+        axs[1].set_position([box.x0, box.y0, box.width, box.height * 0.7])
+        
+        plt.suptitle(title, fontsize=14,x=0.05, horizontalalignment='left')
+        return fig
     
     
 def get_var_str(values):
@@ -437,16 +616,21 @@ def run_trial(test_params, trial_ind, const_params):
         train_image = uid.get_train_image()
         
         with open(params_cache_file, "wb") as f:
-            pickle.dump( (loss, image, train_image), f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump( (loss, image, train_image, params), f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"Saved trial results to {params_cache_file}")
         
     else:
         print(f"Cache file found: {params_cache_file}, loading trial...")
         with open(params_cache_file, "rb") as f:
-            loss, image, train_image = pickle.load(f)
-            print(f"Loaded trial results from {params_cache_file}")    
-        
-    return {'test_params': test_params, 'trial_ind': trial_ind, 'loss': loss, 'image': image, 'train_image': train_image}
+            data = pickle.load(f)
+            if len(data) == 4:
+                loss, image, train_image, params = data
+            else:
+                loss, image, train_image = data
+                # Assume params are ok...
+            print(f"Loaded trial results from {params_cache_file}")
+
+    return {'test_params': test_params, 'trial_ind': trial_ind, 'loss': loss, 'image': image, 'train_image': train_image, 'params': params}
 
 
 COMMON_PARAMS_stochastic = {'_image_file': None,
@@ -469,7 +653,7 @@ COMMON_PARAMS_stochastic = {'_image_file': None,
               
     }
 
-def run_experiment_circles(test_image, n_circles, n_cpu = 12, n_trials = 15, save_fig=True):
+def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True):
     params = COMMON_PARAMS_stochastic.copy()   
     
     # Custom for this experiment but constant:
@@ -494,8 +678,10 @@ def run_experiment_circles(test_image, n_circles, n_cpu = 12, n_trials = 15, sav
 
     exp_name = "test_%s_Circles=%i" % (test_image, n_circles)
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
-    experiment.run(n_cpu=n_cpu)
+    experiment.run()
     fig = experiment.plot(fig_size=(9,12))
+    
+    
     if not save_fig:
         plt.show()
     else:
@@ -503,15 +689,24 @@ def run_experiment_circles(test_image, n_circles, n_cpu = 12, n_trials = 15, sav
         fig_filename = "%s_results.png" % (exp_name,)
         fig.savefig(fig_filename, dpi=300)
         logging.info(f"Saved figure to {fig_filename}")
-    
-# BATCH version:    
+        
+    fig = experiment.plot_summary()
+    if not save_fig:
+        plt.show()
+    else:
+        # Save the figure
+        fig_filename = "%s_summary.png" % (exp_name,)
+        fig.savefig(fig_filename, dpi=300)
+        logging.info(f"Saved figure to {fig_filename}")
+
+# BATCH version:
 # COMMON_PARAMS_BATCH = COMMON_PARAMS_stochastic.copy()
 # COMMON_PARAMS_BATCH.update({'batch_size': 4096,
 #                      'epochs_per_cycle': 1000,
 #                      'run_cycles': 4})
 
 
-def run_experiment_lines(test_image, line_params, n_lines, n_cpu = 12, n_trials = 15, save_fig=True):
+def run_experiment_lines(test_image, line_params, n_lines, n_trials = 15, save_fig=True):
     params = COMMON_PARAMS_stochastic.copy()
     
     params['n_div'] = {'circular': 0, 'linear': n_lines, 'sigmoid': 0}
@@ -536,7 +731,9 @@ def run_experiment_lines(test_image, line_params, n_lines, n_cpu = 12, n_trials 
     
     exp_name = "test_%s_NP=%i_Lines=%i" % (test_image, line_params, n_lines)
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
-    experiment.run(n_cpu=n_cpu)
+    experiment.run()
+    
+    
     fig = experiment.plot()
     if not save_fig:
         plt.show()
@@ -545,6 +742,16 @@ def run_experiment_lines(test_image, line_params, n_lines, n_cpu = 12, n_trials 
         fig_filename = "%s_results.png" % (exp_name,)
         fig.savefig(fig_filename, dpi=300)
         logging.info(f"Saved figure to {fig_filename}")
+        
+    fig = experiment.plot_summary()
+    if not save_fig:
+        plt.show()
+    else:
+        # Save the figure
+        fig_filename = "%s_summary.png" % (exp_name,)
+        fig.savefig(fig_filename, dpi=300)
+        logging.info(f"Saved figure to {fig_filename}")
+        
 
 
 def run_experiments():
@@ -555,10 +762,10 @@ def run_experiments():
     run_experiment_circles(n_circles = 4, test_image = 'circles_4_rand')
     
     run_experiment_lines(line_params=2, n_lines=1, test_image = 'line_rand')
+    run_experiment_lines(line_params=2, n_lines=4, test_image = 'lines_4_rand')
     run_experiment_lines(line_params=2, n_lines=2, test_image = 'lines_2_rand')
     run_experiment_lines(line_params=2, n_lines=3, test_image = 'lines_3_rand')
-    run_experiment_lines(line_params=2, n_lines=4, test_image = 'lines_4_rand')
-    
+
     run_experiment_lines(line_params=3, n_lines=1, test_image = 'line_rand')
     run_experiment_lines(line_params=3, n_lines=2, test_image = 'lines_2_rand')
     run_experiment_lines(line_params=3, n_lines=3, test_image = 'lines_3_rand')

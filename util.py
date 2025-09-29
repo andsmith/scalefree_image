@@ -129,10 +129,10 @@ def add_text(image, text_lines, bbox, line_spacing = 1.5, max_font_scale=3.0, mi
         else:
             raise ValueError("Unknown justify option: %s" % justify)
         y_start = y_text + v_spacing
-        image[y_text,x_text-10:] = 0
+        #image[y_text,x_text-10:] = 0
         cv2.putText(image, line, (x_text, y_text), font_face, font_scale, color, font_thickness, lineType=cv2.LINE_AA)
 
-    draw_bbox(image, bbox, color=(255, 255, 0), thickness=4)
+    #draw_bbox(image, bbox, color=(255, 255, 0), thickness=4)
 
 
 def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):

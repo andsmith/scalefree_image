@@ -30,7 +30,8 @@ from copy import deepcopy
 import argparse
 import json
 from tempfile import tempdir
-from util import add_text, captioned_frame
+from turtle import pos
+from util import add_text, captioned_frame, alpha_blend
 import cv2
 import tempfile
 import shutil
@@ -221,7 +222,7 @@ author = {'frame_rate': 60,
 
 episode_template = {'frame_rate': 20,
               'caption_height_px': 50,  # shrink/grow if if you need more/fewer lines of text
-              'episode_initial_pause_sec': 2.0,
+              'episode_initial_pause_sec': 1.0,
               'episode_final_pause_sec': 10.0,
               'txt_color': COLORS['text'],
               'bkg_color': COLORS['bkg'],
@@ -237,7 +238,7 @@ episode_template = {'frame_rate': 20,
               'episodes': [
                   {'json_meta': None, # will be command line argument
                    'caption': [{'txt': 'frame: %d, L-rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
-                               {'txt': 'loss: %.7f', 'meta_keys': [ 'loss']}]}
+                               {'txt': 'loss: %.7f', 'meta_keys': [ 'current_loss']}]}
               ]
               }
 
@@ -355,7 +356,7 @@ class MovieMaker(object):
             # Check all frames are the same size
             frame_size = frames[0].shape[1], frames[0].shape[0]
             for f_i, f in enumerate(frames):
-                print(f.shape)
+                
                 if (f.shape[1], f.shape[0]) != frame_size:
                     logging.warning("Frame size mismatch:  %s should be %s, resizing..." %
                                     ((f.shape[1], f.shape[0]), frame_size))
@@ -369,10 +370,14 @@ class MovieMaker(object):
         max_delay = 1.0 / self.frame_rate
         sleep_times = []
         user_quit = False
+        paused=False
         win_name = 'preview'
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         win_size = None
-        for i, frame in enumerate(frames):
+        frame_index = 0
+        while frame_index < len(frames):
+            i = frame_index
+            frame = frames[i]
             now = time.perf_counter()
             delay = now - last_time
             sleep_time = max_delay - delay
@@ -384,14 +389,18 @@ class MovieMaker(object):
 
             if win_size is None:
                 targ_frame_size = 975
-                if frame.shape[0] >  targ_frame_size:
-                    mul = targ_frame_size / max(frame.shape[0], frame.shape[1])
+                if True: # frame.shape[0] >  targ_frame_size:
+                    mul = 1.0 #targ_frame_size / max(frame.shape[0], frame.shape[1])
                     win_size = (int(frame.shape[1]*mul), int(frame.shape[0]*mul))
                     cv2.resizeWindow(win_name, win_size[0], win_size[1])
 
-
-
-            cv2.imshow(win_name, frame)
+            if paused: 
+                
+                p_frame = self._add_pause_note(frame)
+            else:
+                p_frame = frame
+                
+            cv2.imshow(win_name, p_frame)
             n_frames += 1
             last_time = time.perf_counter()
 
@@ -406,11 +415,47 @@ class MovieMaker(object):
             if key == 27 or key == ord('q'):
                 user_quit = True
                 break
+            elif key==' ' or key==ord('p'):
+                logging.info("Paused. Hit space or 'p' to resume, 'q' or ESC to exit.")
+                paused = not paused
+                
+            if not paused:
+                frame_index += 1
+                
+                
         if user_quit:
             logging.info("User requested exit from preview.")
             cv2.destroyAllWindows()
             return True
         return False
+    
+    def _add_pause_note(self, frame, margin = 0.10):
+        pad_px = max(min(int(margin * frame.shape[1]), int(margin * frame.shape[0])), 5)
+        pause_mask = 0*frame[:,:,0]
+        pos_xy = (pad_px, frame.shape[0] - pad_px)
+        pause_txt = 'PAUSED (hit P to resume)'
+        font_scale=2.0
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        txt_width, txt_height = np.inf, np.inf
+        while (txt_width > frame.shape[1] - 2*pad_px or txt_height > frame.shape[0] - 2*pad_px) and font_scale > 0.1:
+            font_scale -= 0.1
+            (txt_width, txt_height), baseline = cv2.getTextSize(pause_txt, font, font_scale, 5)
+            
+        pos_xy = (pad_px, frame.shape[0] - pad_px - baseline)
+
+        cv2.putText(pause_mask, pause_txt, pos_xy, font, font_scale, (255,), 5, cv2.LINE_AA)
+        pause_color =(0,0,0)
+        pause_mask =1- pause_mask.astype(np.float32)/255.0
+
+
+        blend_red = frame[:,:,0].astype(np.float32) * pause_mask + pause_color[0] * (1.0-pause_mask)
+        blend_green = frame[:,:,1].astype(np.float32) * pause_mask + pause_color[1] * (1.0-pause_mask)
+        blend_blue = frame[:,:,2].astype(np.float32) * pause_mask + pause_color[2] * (1.0-pause_mask)
+        blend = np.stack((blend_red, blend_green, blend_blue), axis=2)
+        frame = np.clip(blend, 0, 255).astype(np.uint8)
+
+        return frame
+
 
     def _load_episode_frames(self, episode):
         frames = []
@@ -459,16 +504,17 @@ class MovieMaker(object):
                'txt': a format string with %d, %f, etc. for values from 'meta'
                'meta_keys': list of keys to get values from the 'meta' dict.
         """
+
         lines = []
         for cap in base_caption:
             fmt = cap['txt']
             keys = cap['meta_keys']
-            values = [meta[k] if k in meta else 'N/A' for k in keys]
-            try:
-                line = fmt % tuple(values)
-            except (TypeError, KeyError) as e:
-                logging.error(f"Error formatting caption line: {e}")
-                line = fmt % ('N/A',) * len(keys)
+            values = [meta[k] for k in keys]
+            # try:
+            line = fmt % tuple(values)
+            # except (TypeError, KeyError) as e:
+            #     logging.error(f"Error formatting caption line: {e}")
+            #     line = fmt % ('N/A',) * len(keys)
             lines.append(line)
         return lines
 

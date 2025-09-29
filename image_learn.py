@@ -1048,6 +1048,11 @@ class UIDisplay(object):
         plt.show()  # Keep the final plot visible
         
         return self.final_loss, self._output_image
+    
+    def save_model(self, filename):
+        self._sim.save_state(filename)
+        logging.info("Saved model to:  %s" % (filename,))
+        return filename
 
 
 def get_args():
@@ -1085,7 +1090,7 @@ def get_args():
                         "activation(excitation) = tanh(excitation*sharpness).", type=float, default=1000.0)
     parser.add_argument('--gradient_sharpness', help="Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual" +
                         " (very flat) gradient.  High values result in divider units not moving very much, too low" +
-                        " and they don't settle.", type=float, default=5.0)
+                        " and they don't settle.", type=float, default=8.0)
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("-w", "--weigh_center", 

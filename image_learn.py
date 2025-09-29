@@ -400,7 +400,7 @@ class ScaleInvariantImage(object):
         return model
 
     def get_loss(self):
-        loss = self._model.evaluate(self._input, self._output, batch_size=self.batch_size, verbose=0)
+        loss = self._model.evaluate(self._input, self._output, batch_size=8192, verbose=0)
         logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
         return loss
 
@@ -429,11 +429,12 @@ class ScaleInvariantImage(object):
         self._model.fit(input, output, epochs=epochs, sample_weight=sample_weights,
                         batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
         # Get loss for each step
-        batch_history = batch_losses.batch_losses
-        logging.info("Batch losses for cycle %i: %s steps" % (self.cycle, len(batch_history)))
+        loss_history = batch_losses.losses
+
+        logging.info("Batch losses for cycle %i has %i epochs, each with %i minibatches" % (self.cycle, len(loss_history), len(loss_history[0])))
         self.cycle += 1
-        loss = self.get_loss()
-        return batch_history, loss
+        
+        return loss_history
 
     def gen_image(self, output_shape, border=0.0, keep_aspect=True):
 
@@ -446,7 +447,7 @@ class ScaleInvariantImage(object):
                                                                                                    np.min(inputs[:, 1]),
                                                                                                    np.max(inputs[:, 1]),
                                                                                                    inputs.shape[0]))
-        rgb = self._model.predict(inputs)
+        rgb = self._model.predict(inputs, batch_size=8192, verbose=0)
         logging.info("Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
         img = cv2.merge((rgb[:, 0].reshape(shape[:2]), rgb[:, 1].reshape(shape[:2]), rgb[:, 2].reshape(shape[:2])))
         n_clipped = np.sum(img < 0) + np.sum(img > 1)
@@ -498,13 +499,14 @@ class BatchLossCallback(Callback):
 
     def __init__(self):
         super().__init__()
-        self.batch_losses = []
+        self.losses = []  # list for each epoch of all minibatch losses
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        self.losses.append([])  # new epoch    
 
     def on_train_batch_end(self, batch, logs=None):
-        self.batch_losses.append(logs['loss'])
-        # Optional: print the loss for each batch
-        # print(f"Batch {batch+1} loss: {logs['loss']:.4f}")
-
+        self.losses[-1].append(logs['loss'])
+        
 
 class UIDisplay(object):
 
@@ -543,7 +545,7 @@ class UIDisplay(object):
         self._learning_rate_init = learning_rate
         self._learning_rate_final = learning_rate_final
         self._output_image = None
-        self._loss_history = []
+        self._loss_history = [] # list {'cycle': cycle_index,'epochs': [list of minibatch losses for each epoch]}
         self._l_rate_history = []
         self._batch_size = batch_size
         self._nogui = nogui
@@ -606,7 +608,6 @@ class UIDisplay(object):
         """
         if synth_name is not None:
             image_maker = TestImageMaker(image_size_wh)
-            print("Making:", synth_name)
             image_raw = image_maker.make_image(synth_name)
             file_prefix = "SYNTH_%s" % (synth_name,)
             logging.info("Generated synthetic image type %s with shape %s, using prefix %s" %
@@ -693,26 +694,27 @@ class UIDisplay(object):
 
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
-            loss = self._sim.get_loss()
+            cur_loss = self._sim.get_loss()
             frame_name = self._write_frame(self._output_image)  # Create & save image
             init_meta = {'cycle': self._sim.cycle,
                          'learning_rate': self._learn_rate,
-                         'loss': loss,
+                         'loss': cur_loss,
                          'filename': frame_name}
             self._metadata.append(init_meta)
             self._write_metadata()
 
-        loss = None
+        cur_loss = None
         while (max_iter==0 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
             logging.info("Training batch_size: %i, cycle: %i of %i, learning_rate: %.6f" %
                          (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
 
-            new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
-            
+            new_losses = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
+            cur_loss = self._sim.get_loss()
             self._l_rate_history.append(self._learn_rate)
-            self._loss_history.append(new_losses)
+            self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
+            self._cycle = self._sim.cycle  # update AFTER saving data, since train_more increments it at the end
 
             # self._save_state()
             if self._shutdown:
@@ -720,14 +722,13 @@ class UIDisplay(object):
 
             self._output_image = self._gen_image()
             frame_name = self._write_frame(self._output_image)  # Create & save image
-            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'loss': loss, 'filename': frame_name})
+            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
             out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
             self._sim.save_state(out_path)  # TODO:  Move after each cycle
             logging.info("Saved model state to:  %s" % (out_path,))
 
-            self._cycle += 1
             run_cycle += 1
             
 
@@ -745,7 +746,9 @@ class UIDisplay(object):
             logging.info("To make a movie from the images, try:")
             logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
                          (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
-        self.final_loss = loss
+        self.final_loss = cur_loss
+        logging.info("Final loss after %i cycles:  %.6f" % (run_cycle, cur_loss))
+        return cur_loss
     
     def _gen_image(self, shape=None):
         if shape is None:
@@ -900,10 +903,10 @@ class UIDisplay(object):
         loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
         loss_ax.set_ylabel("Loss")
         cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
-        loss_ax.set_title("Training Loss History\n%s\n1 dot = 1 minibatch (%i samples)" % (  cmd, self._batch_size))
+        loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
 
-        lrate_ax.set_ylabel("Learning Rate")
-        lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
+        lrate_ax.set_ylabel("")  # Learning Rate")
+        lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,), fontsize=10)
         lrate_ax.set_yscale('log')
 
         fig.canvas.mpl_connect('key_press_event', self._keypress_callback)
@@ -913,7 +916,7 @@ class UIDisplay(object):
         self._show_weight_contours = True
         # start main UI loop (training is in the thread):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
-        
+        fig.tight_layout()
         while not self._shutdown and (self._worker is None or self._worker.is_alive()):
             # try:
             if artists['train_img'] is None or self._update_plots:
@@ -935,7 +938,7 @@ class UIDisplay(object):
             #     artists['train_img'].set_data(self._sim.image_train)
             cmd =( "\n('w' to hide weight contours)" if self._show_weight_contours else "\n('w' to show weight contours)")\
                 if self._center_weight_params is not None else ""
-            train_ax.set_title("Training cycle %i/%s...\ntarget image %i x %i%s" %
+            train_ax.set_title("Training cycle %i/%s, target image %i x %i%s" %
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
 
@@ -943,7 +946,9 @@ class UIDisplay(object):
 
             if self._output_image is not None:
                 # Can take a while to generate the first image
-                out_ax.set_title("Cycle %i loss: %.5f\nOutput Image %s" % (self._cycle, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
+                out_ax.set_title("Cycle %i loss: %.5f\nOutput Image wxh = %s" % (self._cycle, 
+                                                                           self._loss_history[-1]['final_loss'] if len(self._loss_history) > 0 else -1.0, 
+                                                                           self._output_image.shape[:2][::1]))
                 out_img =self._output_image
                 self._sim.draw_div_units(out_unit_ax, output_image=out_img, norm_colors=True)
                 div_units_str = ""
@@ -953,7 +958,7 @@ class UIDisplay(object):
                     div_units_str += "%i Line units (lines use the %i-parameterization)" % (self.n_div['linear'], self._line_params)
                 if self.n_div['sigmoid'] > 0:
                     div_units_str += "%i Sigmoid units" % (self.n_div['sigmoid'], )
-                out_unit_ax.set_title("Output image with division units:\n%s" % div_units_str)
+                out_unit_ax.set_title("Output image with division units:\n%s" % div_units_str, fontsize=10)
                 # turn off x and y axes
                 out_unit_ax.axis("off")
 
@@ -968,25 +973,91 @@ class UIDisplay(object):
 
             if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
                 """
-                Plot the individual minibatch losses, and their mean per cycle on top.   
+                X-axis will count CYCLES. 
+                
+                For the loss history, plot each minibatch as a dot, the epoch means as red line segments, and the cycle means as yellow lines
+                Show the final loss as a yellow dot at the end of each cycle.
                 """
                 if len(self._loss_history) ==0 or len(self._l_rate_history) == 0:
                     self._update_plots = False
                     continue
                 graph_update_cycle = self._cycle
-                all_losses = np.hstack(self._loss_history)
-                loss_sizes = [np.array(lh).size for lh in self._loss_history]
-                cycle_x = np.hstack([np.linspace(c, c+1.0, size, endpoint=False) for c, size in zip(range(len(loss_sizes)), loss_sizes)])
-                total_xy = np.array((cycle_x, all_losses)).T
-                if artists['loss'] is None:
-                    artists['loss'] = loss_ax.plot(total_xy[:, 0], total_xy[:, 1], 'b.', label='Loss per step')[0]
-                    loss_ax.set_yscale('log')
-                else:
-                    artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
-                first_ind = 0 if self._show_all_hist else all_losses.size- np.sum(loss_sizes[-max_hist_cycles:])
-                smallest, biggest = all_losses[first_ind:].min(), all_losses[first_ind:].max()
                 
-                loss_ax.set_ylim(smallest * 0.9, biggest * 1.1)
+                # Prepare data
+                n_cycles = len(self._loss_history)
+                n_minibatches_per_epoch = len(self._loss_history[-1]['epochs'][0])
+                epoch_x_offset_per_cycle = np.linspace(0, 1, self._epochs_per_cycle, endpoint=False)
+                minibatch_x_offset_per_epoch =  np.linspace(0, 1.0/self._epochs_per_cycle,  n_minibatches_per_epoch, endpoint=False)
+                
+                minibatch_x = []
+                epoch_x0 = []  # means plotted with lines go from x0 to x1 (epochs and cycles)
+                cycle_x0 = np.arange (n_cycles)
+                cycle_x1 = cycle_x0 + 1.0
+                
+                cycle_means = []
+                minibatch_losses = []
+                epoch_means = []
+                
+                
+                for c_ind, cyc_loss in enumerate(self._loss_history[-n_cycles:]):
+                    e_losses = [np.mean(ep) for ep in cyc_loss['epochs']]
+                    cycle_means.append(np.mean(e_losses))
+                    e_x =  c_ind + epoch_x_offset_per_cycle
+                    epoch_x0.extend(e_x)
+                    epoch_means.extend(e_losses)
+                    
+                    for e_ind, ep in enumerate(cyc_loss['epochs']):
+                        mb_x = c_ind + epoch_x_offset_per_cycle[e_ind] + minibatch_x_offset_per_epoch
+                        minibatch_x.extend(mb_x)
+                        minibatch_losses.extend(ep)
+                
+                def _make_flat_line_segments(x0, x1, y):
+                    x = np.zeros(2 * len(y))
+                    y_flat = np.zeros(2 * len(y))
+                    x[0::2] = x0
+                    x[1::2] = x1
+                    y_flat[0::2] = y
+                    y_flat[1::2] = y
+                    return x, y_flat
+                
+                # Filter if not showing all history
+                if not self._show_all_hist and n_cycles > max_hist_cycles:
+                    first_ind = n_cycles - max_hist_cycles
+                    minibatch_x = minibatch_x[first_ind * self._epochs_per_cycle * n_minibatches_per_epoch:]
+                    minibatch_losses = minibatch_losses[first_ind * self._epochs_per_cycle * n_minibatches_per_epoch:]
+                    epoch_x0 = epoch_x0[first_ind * self._epochs_per_cycle:]
+                    epoch_means = epoch_means[first_ind * self._epochs_per_cycle:]
+                    cycle_x0 = cycle_x0[first_ind:]
+                    cycle_x1 = cycle_x1[first_ind:]
+                    cycle_means = cycle_means[first_ind:]
+                
+                cycle_x, cycle_means = _make_flat_line_segments(cycle_x0, cycle_x1, cycle_means)
+                epoch_x, epoch_means = _make_flat_line_segments(epoch_x0, epoch_x0[1:] + [epoch_x0[-1] + 1.0/self._epochs_per_cycle], epoch_means)
+                minibatch_x = np.array(minibatch_x)
+                minibatch_losses = np.array(minibatch_losses)
+                
+                # Plot / update loss axis
+                if artists['loss'] is None:
+                    artists['loss'] = {'minibatch_data': loss_ax.plot(minibatch_x, minibatch_losses, 'b.', label='Minibatch Loss')[0],
+                                       'epoch_means': loss_ax.plot(epoch_x, epoch_means, 'r-', label='Epoch Means')[0],
+                                       'cycle_means': loss_ax.plot(cycle_x, cycle_means, 'g-', label='Cycle Means')[0]}
+                    loss_ax.legend(loc='lower left', fontsize='small')
+                    # Set y to log-scale
+                    loss_ax.set_yscale('log')
+                    
+                else:
+                    artists['loss']['minibatch_data'].set_data(minibatch_x, minibatch_losses)
+                    artists['loss']['epoch_means'].set_data(epoch_x, epoch_means)
+                    artists['loss']['cycle_means'].set_data(cycle_x, cycle_means)
+                # set x and y limits (x should be flush to cycle boundaries, y should have a .05 margin top and bottom)
+                x_min, x_max = cycle_x0[0], cycle_x1[-1]
+                y_min, y_max = np.min(minibatch_losses), np.max(minibatch_losses)
+                loss_ax.set_xlim(x_min - 0.05 * (x_max - x_min), x_max + 0.05 * (x_max - x_min))
+                y_range = y_max - y_min
+                loss_ax.set_ylim(y_min/10.0**.1, y_max*10.0**.1)
+
+                cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
+                loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
 
                 # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
                 # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
@@ -1016,7 +1087,6 @@ class UIDisplay(object):
                 
             self._update_plots = False
 
-            fig.tight_layout()
             plt.draw()
             fig.canvas.flush_events()  # Force canvas to update
                 
@@ -1081,17 +1151,22 @@ def get_args():
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parsed = parser.parse_args()
+    
+    # Assemble various arg collections:
+    
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
+    
     center_weight = {'weight': parsed.weigh_center[0], 
                      'flatness': parsed.weigh_center[2],
                      "xy_offsets_rel": (parsed.weigh_center[3], parsed.weigh_center[4]),
                      'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
-    # print("CENTER WEIGHT PARAMS:  ", center_weight)
+    
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
+    
     return parsed, kwargs
 
 

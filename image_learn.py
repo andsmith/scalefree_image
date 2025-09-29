@@ -869,7 +869,7 @@ class UIDisplay(object):
             grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,.7])
             logging.info("Tall images, orienting side-by-side.")
             train_ax = fig.add_subplot(grid[:, 0])
-            weight_ax= fig.add_subplot(grid[:, 1])
+            out_unit_ax= fig.add_subplot(grid[:, 1])
         else:
             # wide images, stacked vertically, plots on the right
             #
@@ -884,7 +884,7 @@ class UIDisplay(object):
             logging.info("--------------------------Wide images, orienting vertically.")
             grid = gridspec.GridSpec(8, 2, width_ratios=[2,.7])
             train_ax = fig.add_subplot(grid[:4, 0])
-            weight_ax = fig.add_subplot(grid[4:, 0])
+            out_unit_ax = fig.add_subplot(grid[4:, 0])
         
         #if self._center_weight_params is not None:            
         lrate_ax = fig.add_subplot(grid[:2, -1])
@@ -945,7 +945,17 @@ class UIDisplay(object):
                 # Can take a while to generate the first image
                 out_ax.set_title("Cycle %i loss: %.5f\nOutput Image %s" % (self._cycle, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
                 out_img =self._output_image
-                self._sim.draw_div_units(weight_ax, output_image=out_img, norm_colors=True)
+                self._sim.draw_div_units(out_unit_ax, output_image=out_img, norm_colors=True)
+                div_units_str = ""
+                if self.n_div['circular'] > 0:
+                    div_units_str += "%i Circle units " % (self.n_div['circular'],)
+                if self.n_div['linear'] > 0:
+                    div_units_str += "%i Line units (lines use the %i-parameterization)" % (self.n_div['linear'], self._line_params)
+                if self.n_div['sigmoid'] > 0:
+                    div_units_str += "%i Sigmoid units" % (self.n_div['sigmoid'], )
+                out_unit_ax.set_title("Output image with division units:\n%s" % div_units_str)
+                # turn off x and y axes
+                out_unit_ax.axis("off")
 
                         
                 if artists['out_img'] is None:

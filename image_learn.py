@@ -246,6 +246,8 @@ class ScaleInvariantImage(object):
             image = output_image if output_image is not None else self.image_train
             img_ax.imshow(image, extent=image_extent)
         #ax.invert_yaxis()
+        alpha=1.0
+        line_width = 2.0
 
         params = self.get_div_params()
         
@@ -260,7 +262,7 @@ class ScaleInvariantImage(object):
                 #angles = np.pi/2.0 - angles  
                 if len(self._artists['linear']['center_points']) == 0:
                     self._artists['linear']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
-                                                                        'o', color='red', markersize=4, alpha=0.5)[0])
+                                                                        'o', color='red', markersize=4, alpha=alpha)[0])
                 else:
                     self._artists['linear']['center_points'][0].set_data(centers[:,0], centers[:,1])
 
@@ -278,6 +280,7 @@ class ScaleInvariantImage(object):
 
             elif 'offsets' in params['linear']:
                 # 2 parameterization of the line (angle, offset from origin)
+                self._artists['linear']['center_points']= None  # Unused for 2-parameter lines
                 offsets = params['linear']['offsets']
                 angles = params['linear']['angles']
                 normals = np.vstack((np.cos(angles), np.sin(angles))).T
@@ -286,21 +289,17 @@ class ScaleInvariantImage(object):
                     d = offsets[l_i]
                     # point on line closest to origin:
                     c = n * d
-                    line_len = 3.0
-                    dx = np.cos(angles[l_i]) * line_len
-                    dy = np.sin(angles[l_i]) * line_len
-                    if len(self._artists['linear']['center_points']) <= l_i:
-                        self._artists['linear']['center_points'].append( ax.plot(c[0], c[1], 
-                                                                            'o', color='blue', markersize=4, alpha=0.5)[0])
-                    else:
-                        self._artists['linear']['center_points'][l_i].set_data(c[0], c[1])
-
+                    t = [-3.0, 3.0]
+                    dx = np.cos(angles[l_i])
+                    dy = np.sin(angles[l_i])
+                    p0= c + t[0] * np.array([-dy, dx])
+                    p1= c + t[1] * np.array([-dy, dx])
+                    
                     if len(self._artists['linear']['lines']) <= l_i:
-                        line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='blue', alpha=0.5)
+                        line, = ax.plot([p0[0], p1[0]], [-p0[1], -p1[1]], '-', color='blue', alpha=alpha, linewidth=line_width)
                         self._artists['linear']['lines'].append(line)
                     else:
-                        self._artists['linear']['lines'][l_i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy]
-                                                                      )
+                        self._artists['linear']['lines'][l_i].set_data([p0[0], p1[0]], [-p0[1], -p1[1]])
         if 'circular' in params:
             
             centers = params['circular']['centers']# switch to (x,y)
@@ -309,7 +308,7 @@ class ScaleInvariantImage(object):
 
             if len(self._artists['circular']['center_points']) == 0:
                 self._artists['circular']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
-                                                                    'o', color='blue', markersize=4, alpha=0.5)[0])
+                                                                    'o', color='blue', markersize=4, alpha=alpha)[0])
             else:
                 self._artists['circular']['center_points'][0].set_data(centers[:,0], centers[:,1])
             
@@ -317,7 +316,7 @@ class ScaleInvariantImage(object):
                 c = centers[i]
                 r = radii[i]
                 if len(self._artists['circular']['curves']) <= i:
-                    circle_inner = plt.Circle((c[0], c[1]), r, color='red', fill=False)
+                    circle_inner = plt.Circle((c[0], c[1]), r, color='red', fill=False, alpha=alpha, linewidth=line_width)
                     ax.add_artist(circle_inner)
                     self._artists['circular']['curves'].append(circle_inner)
                 else:
@@ -867,7 +866,7 @@ class UIDisplay(object):
             grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,.7])
             logging.info("Tall images, orienting side-by-side.")
             train_ax = fig.add_subplot(grid[:, 0])
-            out_ax = fig.add_subplot(grid[:, 1])
+            weight_ax= fig.add_subplot(grid[:, 1])
         else:
             # wide images, stacked vertically, plots on the right
             #
@@ -882,12 +881,12 @@ class UIDisplay(object):
             logging.info("--------------------------Wide images, orienting vertically.")
             grid = gridspec.GridSpec(8, 2, width_ratios=[2,.7])
             train_ax = fig.add_subplot(grid[:4, 0])
-            out_ax = fig.add_subplot(grid[4:, 0])
+            weight_ax = fig.add_subplot(grid[4:, 0])
         
         #if self._center_weight_params is not None:            
         lrate_ax = fig.add_subplot(grid[:2, -1])
         loss_ax = fig.add_subplot(grid[2:5, -1],sharex=lrate_ax)
-        weight_ax = fig.add_subplot(grid[5:, -1])
+        out_ax = fig.add_subplot(grid[5:, -1])
         weights_plotted=False
         # else:
         #     lrate_ax = fig.add_subplot(grid[:3, -1])

@@ -56,7 +56,7 @@ class ScaleInvariantImage(object):
         :param grad_sharpness: sharpness constant for gradient of activation function, e.g. f'(x) = sharpness * sech^2(x*sharpness)
         :param learning_rate_initial: initial learning rate for Adadelta optimizer
         :param downscale: downscale factor for training image (1.0 = full size, 0.5 = half size, etc)
-        :param center_weight_params: if not None, a dict with keys 'weight' (float) and 'sigma' (float) to weight center pixels more heavily
+        :param center_weight_params: if not None, a dict with keys: 'r_inner' (float), 'r_outer' (float), 'w_max' (float), and 'xy_offset' (tuple of floats)
 
         """
         self.image_raw = image_raw
@@ -80,7 +80,8 @@ class ScaleInvariantImage(object):
                              'center_points': [],
                              'lines': []},
                          'sigmoid': { 
-                             'bands': []}}
+                             'bands': []},
+                         'output_image': None}
 
         self._lims_set = False
 
@@ -140,13 +141,9 @@ class ScaleInvariantImage(object):
         
         if self._center_weight_params is not None:
             train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
-            self._weight_grid = make_central_weights(train_img_size_wh, 
-                                                     max_weight=self._center_weight_params['weight'],
-                                                     rad_rel=self._center_weight_params['sigma'], 
-                                                     flatness=self._center_weight_params['flatness'],
-                                                     offsets_rel=self._center_weight_params['xy_offsets_rel'])
+            self._weight_grid = make_central_weights(train_img_size_wh, **self._center_weight_params)
             logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
-                         (self._center_weight_params['weight'], self._center_weight_params['sigma'], train_img_size_wh))
+                         (self._center_weight_params['w_max'], self._center_weight_params['r_inner'], train_img_size_wh))
             self._sample_weights = self._weight_grid.reshape(-1)
             self.weight_cross_sections = {'x': self._weight_grid[self._weight_grid.shape[0]//2,:],
                                           'y': self._weight_grid[:,self._weight_grid.shape[1]//2]}
@@ -232,7 +229,7 @@ class ScaleInvariantImage(object):
         return r_px.astype(int)
 
 
-    def draw_div_units(self, ax, output_image=None, margin=0.1, norm_colors=False, plot_units=False):
+    def draw_div_units(self, ax, output_image=None, margin=0.1, plot_units=False):
         """
         # Draw a representation of the division units on the given axis.
         For line units: 
@@ -256,16 +253,26 @@ class ScaleInvariantImage(object):
              x_lim = (-aspect_ratio, aspect_ratio)
              y_lim = (-1.0/aspect_ratio-margin, 1.0/aspect_ratio+margin)
              
-        # normalize so each channel spans full range:
-        if norm_colors and output_image is not None:
-            for c in range(3):
-                c_min, c_max = output_image[:, :, c].min(), output_image[:, :, c].max()
-                if c_max > c_min:
-                    output_image[:, :, c] = (output_image[:, :, c] - c_min) / (c_max - c_min)
-                        
-            image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
-            image = output_image if output_image is not None else self.image_train
-            img_ax.imshow(image, extent=image_extent)
+        # Base image for plotting (reuse artist to avoid accumulation)
+        if output_image is not None:
+            # if norm_colors:
+            #     img_to_show = output_image.copy()
+            #     for c in range(3):
+            #         c_min, c_max = img_to_show[:, :, c].min(), img_to_show[:, :, c].max()
+            #         if c_max > c_min:
+            #             img_to_show[:, :, c] = (img_to_show[:, :, c] - c_min) / (c_max - c_min)
+            # else:
+            #     img_to_show = output_image
+            img_to_show = output_image
+        else:
+            img_to_show = self.image_train
+
+        image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
+        if self._artists['output_image'] is None:
+            self._artists['output_image'] = img_ax.imshow(img_to_show, extent=image_extent)
+        else:
+            self._artists['output_image'].set_data(img_to_show)
+            self._artists['output_image'].set_extent(image_extent)
         #ax.invert_yaxis()
         alpha=1.0
         line_width = 2.0
@@ -838,9 +845,8 @@ class UIDisplay(object):
             self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
             self._cycle = self._sim.cycle  # update AFTER saving data, since train_more increments it at the end
 
-            # self._save_state()
-            if self._shutdown:
-                break
+
+
 
             self._output_image = self._gen_image()
             frame_name = self._write_frame(self._output_image)  # Create & save image
@@ -850,7 +856,10 @@ class UIDisplay(object):
             out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
             self._sim.save_state(out_path)  # TODO:  Move after each cycle
             logging.info("Saved model state to:  %s" % (out_path,))
-
+            
+            if self._shutdown:
+                break
+            
             run_cycle += 1
             
 
@@ -996,8 +1005,8 @@ class UIDisplay(object):
             #   |      | |      | |p2|
             #   |      | |      | |  |
             #   +------+ +------+ +--+
-            
-            grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,.7])
+
+            grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,1])
             logging.info("Tall images, orienting side-by-side.")
             train_ax = fig.add_subplot(grid[:, 0])
             out_unit_ax= fig.add_subplot(grid[:, 1])
@@ -1013,7 +1022,7 @@ class UIDisplay(object):
             #   | Output      | |  |
             #   +-------------+ +--+
             logging.info("--------------------------Wide images, orienting vertically.")
-            grid = gridspec.GridSpec(8, 2, width_ratios=[2,.7])
+            grid = gridspec.GridSpec(8, 2, width_ratios=[2,1])
             train_ax = fig.add_subplot(grid[:4, 0])
             out_unit_ax = fig.add_subplot(grid[4:, 0])
         
@@ -1046,7 +1055,7 @@ class UIDisplay(object):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
         cleanup_counter = 0  # Track when to do matplotlib cleanup
         fig.tight_layout()
-        LPT.reset(enable=False, burn_in=4, display_after=30,save_filename = "loop_timing_log.txt")
+        LPT.reset(enable=False, burn_in=4, display_after=100,save_filename = "loop_timing_log.txt")
         while not self._shutdown and (self._worker is None or self._worker.is_alive()):
             # try:
             LPT.mark_loop_start()
@@ -1056,7 +1065,7 @@ class UIDisplay(object):
                 if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
                     # apply contour lines at 20% intervals
                     n_cont = 7
-                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(0.0, self._center_weight_params['weight'], n_cont, endpoint=True)[1:]]
+                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
                     colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
                     for level_ind, contours in enumerate(contour_levels):
                         for contour in contours:
@@ -1084,7 +1093,7 @@ class UIDisplay(object):
                                                                            self._loss_history[-1]['final_loss'] if len(self._loss_history) > 0 else -1.0, 
                                                                            self._output_image.shape[:2][::1]))
                 out_img =self._output_image
-                self._sim.draw_div_units(out_unit_ax, output_image=out_img, norm_colors=True, plot_units=self._show_dividers)
+                self._sim.draw_div_units(out_unit_ax, output_image=out_img, plot_units=self._show_dividers)
                 
                 div_units_str = ""
                 if self.n_div['circular'] > 0:
@@ -1107,6 +1116,7 @@ class UIDisplay(object):
                     out_ax.axis("off")
                     out_ax.set_aspect('equal')
             LPT.add_marker("output image done")
+            lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
             if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
                 """
                 X-axis will count CYCLES. 
@@ -1210,7 +1220,7 @@ class UIDisplay(object):
                     artists['lrate'].set_data(lrate_x, lrate_y)
                 first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
                 lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
-                lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
+                
 
                 # set shared x limit
                 if  self._show_all_hist:
@@ -1225,7 +1235,7 @@ class UIDisplay(object):
 
             # Periodic cleanup to prevent matplotlib memory accumulation
             cleanup_counter += 1
-            if cleanup_counter % 5 == 0:  # Every 50 iterations
+            if False:#cleanup_counter % 50 == 0:  # Every 50 iterations
                 # Clear matplotlib's internal caches
                 fig.canvas.flush_events()
                 # Force garbage collection of matplotlib artists
@@ -1237,7 +1247,7 @@ class UIDisplay(object):
             LPT.add_marker("draw done")
             fig.canvas.flush_events()  # Force canvas to update
             LPT.add_marker("flush done")
-            plt.pause(0.1)
+            plt.pause(0.01)
             LPT.add_marker("pause done")
             # except Exception as e:
             #     logging.error(f"Error updating GUI: {e}")
@@ -1294,7 +1304,7 @@ def get_args():
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("-w", "--weigh_center", 
-                        help="Weigh pixels nearer the center higher during training by this radius / spread / flatness and x, y offsets.",
+                        help="Weigh pixels nearer the center higher during training by this r_inner, r_outer, lr_max, and x, y offsets.",
                         nargs=5, type=float, default=[1.0, 2.0])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
@@ -1314,11 +1324,13 @@ def get_args():
                                            int(parsed.render_dividers[3]))}
     else:
         div_render = None
-    
-    center_weight = {'weight': parsed.weigh_center[0], 
-                     'flatness': parsed.weigh_center[2],
-                     "xy_offsets_rel": (parsed.weigh_center[3], parsed.weigh_center[4]),
-                     'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
+    if len(parsed.weigh_center) == 5:
+        center_weight = {'w_max': parsed.weigh_center[0], 
+                         'r_inner': parsed.weigh_center[1],
+                         'r_outer': parsed.weigh_center[2],  
+                         'offsets_xy_rel': (parsed.weigh_center[3], parsed.weigh_center[4])}
+    elif len(parsed.weigh_center) != 0:
+        raise Exception("If using --weigh_center, must provide 5 values:  r_inner, r_outer, w_max, x_offset_rel, y_offset_rel")
     
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,

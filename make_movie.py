@@ -31,7 +31,7 @@ import argparse
 import json
 from tempfile import tempdir
 from turtle import pos
-from util import add_text, captioned_frame, alpha_blend
+from util import add_text, captioned_frame
 import cv2
 import tempfile
 import shutil

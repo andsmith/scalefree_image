@@ -179,59 +179,62 @@ def test_add_text():
     cv2.destroyAllWindows()
     
     
-def make_central_weights(img_size_wh, max_weight=10.0, rad_rel=0.5, offsets_rel=(0.5,0.5), flatness = 0.0):
+def make_central_weights(img_size_wh, w_max, r_inner, r_outer, offsets_xy_rel, smooth=3):
     """
     Make a weight matrix that weights pixels near the center more heavily using a Gaussian falloff 
     :param img_size_wh: (width, height) of the image
-    :param max_weight: maximum weight at the center
-    :param rad_rel: radius (relative to half the image diagonal) at which the weight falls to 50% of max_weight
-    :param offsets_rel: (x,y) offsets of the center relative to image size (0.5,0.5 = center of image)
-    :param flatness: The values above this fraction of max_weight are clipped, then everything
-    is scaled to [1.0, max_weight].  (0.0 = no clipping, 1.0 = all weights are max_weight)
-    :return: weight matrix of shape (height, width)
+    :param w_max: maximum weight at center
+    :param r_inner: radius (in 0..1) of inner region with max weight
+    :param r_outer: radius (in 0..1) of outer region where weight falls to 1.0
+    :param offsets_xy_rel: (x_offset, y_offset) relative offsets of center (0.5, 0.5 = center)
     """
     w, h = img_size_wh
-    x_offset, y_offset = (offsets_rel[0]-0.5)*w, (offsets_rel[1]-0.5)*h
+    x_offset, y_offset = (offsets_xy_rel[0]-0.5)*w, (offsets_xy_rel[1]-0.5)*h
     yv, xv = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
     cx, cy = (w-1)/2.0 + x_offset, (h-1)/2.0 + y_offset
     rad = np.sqrt((xv - cx)**2 + (yv - cy)**2)
-    max_rad = np.sqrt((w/2.0)**2 + (h/2.0)**2)
-    sigma = rad_rel * max_rad / np.sqrt(2.0 * np.log(2.0))  # so that weight is half max_weight at rad_rel * max_rad
-    weights = 1.0 + (max_weight - 1.0) * np.exp(-0.5 * (rad/sigma)**2)
-    weights = weights - np.min(weights) 
-    weights = weights / np.max(weights) * (max_weight-1.0) 
-    if flatness > 0.0:
-        nonflatness = 1.0 - flatness
-        clip_val = weights.max() * nonflatness
-        print("Clipping weights above %.3f (%.1f%% of max)" % (clip_val, nonflatness*100.0))
-        weights = np.clip(weights, 1.0, clip_val)
-        weights = (weights - np.min(weights)) / (np.max(weights) - np.min(weights)) * (max_weight - 1.0) + 1.0
+    rad_inner_px = r_inner * max(w, h)
+    rad_outer_px = r_outer * max(w, h)
+    weights = np.ones_like(rad, dtype=np.float32)
+    mask_inner = rad <= rad_inner_px
+    mask_outer = rad >= rad_outer_px
+    mask_middle = np.logical_and(rad > rad_inner_px, rad < rad_outer_px)
+    weights[mask_inner] = w_max
+    weights[mask_outer] = 1.0
+    weights[mask_middle] = 1.0 + (w_max - 1.0) * (1.0 - (rad[mask_middle] - rad_inner_px) / (rad_outer_px - rad_inner_px))
+    if smooth > 1:
+        weights = cv2.GaussianBlur(weights, (smooth|1, smooth|1), 0)
+    weights = (weights - np.min(weights)) / (np.max(weights) - np.min(weights)) * (w_max - 1.0) + 1.0
+    weights = np.clip(weights, 1.0, w_max)
+        
     return weights.astype(np.float32)   
 
 def test_make_central_weights():
-    shapes = [(100, 100), (200, 140), (130, 200)]
-    weight = 5.0
-    rad_rels = [0.1, 0.3, 0.5, .75, .9]
-    flatness = 0.5
-    fig, axes = plt.subplots(len(shapes)*2, len(rad_rels), figsize=(16, 10))
-    for i, shape in enumerate(shapes):
-        for j, rad_rel in enumerate(rad_rels):
-            w = make_central_weights(shape, max_weight=weight, rad_rel=rad_rel, flatness=flatness)
+    shape  =  (352, 649)
+    weight = 2.0
+    rad_inner = .3
+    rad_outer = .35
+    x_y_offset_rel = (0.45,0.3)
+    
+    fig, axes = plt.subplots(2, 1, figsize=(5, 7))
+    axes = axes.flatten()
+    w = make_central_weights(shape[::-1], w_max=weight, r_inner=rad_inner, r_outer=rad_outer, offsets_xy_rel=x_y_offset_rel, smooth=5)
 
-            ax_image = axes[i*2, j]
-            ax_cross_section = axes[i*2+1, j]
-            
-            # show contour lines at 10% intervals
-            num_intervals = 5
-            levels = [w.min() + i * ((w.max() - w.min()) / num_intervals) for i in range(num_intervals + 1)]
-            ax_image.contour(w, levels=levels, cmap='viridis', linewidths=0.5)
-            ax_image.set_title("Weights (contours at 20%% increments)", fontsize=10)
-            
-            cross_data = w[w.shape[0]//2,:]
-            ax_cross_section.plot(cross_data, color='black')
-            ax_cross_section.set_title("Cross-section\nshape=%s, rad_rel=%.2f" % (shape, rad_rel), fontsize=10)
-            #ax_cross_section.axis('off')
-            
+    ax_image = axes[0]
+    ax_cross_section = axes[1]  
+                            
+    
+    # show contour lines at 10% intervals
+    num_intervals = 5
+    levels = [w.min() + i * ((w.max() - w.min()) / num_intervals) for i in range(num_intervals + 1)]
+    ax_image.contour(w, levels=levels, cmap='viridis', linewidths=0.5)
+    ax_image.set_title("Weights (contours at 20%% increments)", fontsize=10)
+    
+    cross_data = w[w.shape[0]//2,:]
+    ax_cross_section.plot(cross_data, color='black')
+    #ax_cross_section.set_title("Cross-section\nshape=%s, rad_rel=%.2f" % (shape, rad_rel), fontsize=10)
+    #ax_cross_section.axis('off')
+    
     plt.tight_layout()
     plt.show()
 

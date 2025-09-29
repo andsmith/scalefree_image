@@ -174,10 +174,11 @@ class ScaleInvariantImage(object):
             elif layer.__class__.__name__ == 'LineLayer':
                 weights = layer.get_weights()
                 # three param:
-                #params['linear'] = {'centers': weights[0], 'angles': weights[1]}
-                
+                if self._line_params == 3:
+                    params['linear'] = {'centers': weights[0], 'angles': weights[1], 'offsets': weights[2]}
                 # two param"
-                params['linear'] = {'offsets': weights[0], 'angles': weights[1]}
+                elif self._line_params == 2:
+                    params['linear'] = {'offsets': weights[0], 'angles': weights[1]}
             elif layer.__class__.__name__ == 'NormalLayer':
                 weights = layer.get_weights()
                 params['sigmoid'] = {'weights': weights[0], 'biases': weights[1]}
@@ -251,13 +252,14 @@ class ScaleInvariantImage(object):
 
         params = self.get_div_params()
         
+        
         if 'linear' in params:
             if 'centers' in params['linear']:
                 centers = params['linear']['centers'].reshape(-1,2)  # switch to (x,y)
                 # FLIP Y for display
                 #centers = centers[:,::-1]
                 centers[:,1] = -centers[:,1]
-                #angles = params['linear']['angles']
+                angles = params['linear']['angles']
                 # rotate for display
                 #angles = np.pi/2.0 - angles  
                 if len(self._artists['linear']['center_points']) == 0:
@@ -266,17 +268,18 @@ class ScaleInvariantImage(object):
                 else:
                     self._artists['linear']['center_points'][0].set_data(centers[:,0], centers[:,1])
 
-                # for i in range(self.n_div['linear']):
-                #     c = centers[i]
-                #     a = angles[i]
-                #     line_len = 3.0
-                #     dx = np.cos(a) * line_len
-                #     dy = np.sin(a) * line_len
-                #     if len(self._artists['linear']['lines']) <= i:
-                #         line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='red', alpha=0.5)
-                #         self._artists['linear']['lines'].append(line)
-                #     else:
-                #         self._artists['linear']['lines'][i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy])
+                for i in range(self.n_div['linear']):
+                    c = centers[i]
+                    t = [-3.0, 3.0]
+                    dx = np.cos(angles[i])
+                    dy = np.sin(angles[i])
+                    p0 = c + t[0] * np.array([dy, dx])
+                    p1 = c + t[1] * np.array([dy, dx])
+                    if len(self._artists['linear']['lines']) <= i:
+                        line, = ax.plot([p0[0], p1[0]], [p0[1], p1[1]], '-', color='red', alpha=0.5)
+                        self._artists['linear']['lines'].append(line)
+                    else:
+                        self._artists['linear']['lines'][i].set_data([p0[0], p1[0]], [p0[1], p1[1]])
 
             elif 'offsets' in params['linear']:
                 # 2 parameterization of the line (angle, offset from origin)
@@ -888,15 +891,7 @@ class UIDisplay(object):
         loss_ax = fig.add_subplot(grid[2:5, -1],sharex=lrate_ax)
         out_ax = fig.add_subplot(grid[5:, -1])
         weights_plotted=False
-        # else:
-        #     lrate_ax = fig.add_subplot(grid[:3, -1])
-        #     loss_ax = fig.add_subplot(grid[3:, -1],sharex=lrate_ax)
-        #     weight_ax = None
-        #     weights_plotted=True
-            
-                
-
-
+        
         lrate_ax.grid(which='major', axis='both')
         loss_ax.grid(which='both', axis='both')
         lrate_ax.tick_params(labeltop=False, labelbottom=False)# turn off x tick labels for lrate
@@ -944,23 +939,6 @@ class UIDisplay(object):
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
 
-            # if not weights_plotted:
-            #     if self._center_weight_params is not None and self._sim.weight_cross_sections is not None and weight_ax is not None:
-            #         weight_ax.cla()
-            #         xc, yc = self._sim.weight_cross_sections['x'], self._sim.weight_cross_sections['y']
-            #         weight_ax.plot(np.linspace(0, 1.0, xc.size), xc, 'r-', label='X cross-section')
-            #         weight_ax.plot(np.linspace(0, 1.0, yc.size), yc, 'b-', label='Y cross-section')
-            #         weight_ax.set_title("Sample Weights Cross-Sections")
-            #         #weight_ax.set_ylabel("Relative Weight")
-            #         #weight_ax.set_xlabel("Pixel Index")
-            #         weight_ax.legend(fontsize=8)
-            #         # turn off x axis labels, tickes
-            #         weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
-            #                                 left=True, right=False, bottom=False, top=False)
-            #         weight_ax.set_ylim(0.0, self._center_weight_params['weight'] * 1.1)
-            #         # add grid
-            #         weight_ax.grid(which='both', axis='y')
-            #         weights_plotted=True
             
 
             if self._output_image is not None:
@@ -1119,6 +1097,6 @@ if __name__ == "__main__":
     print_args['_model_file'] = parsed.model_file
     print_args['_test_image'] = parsed.test_image
     pprint.pprint(print_args)
-
+    
     s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file, **kwargs)
     s.run()

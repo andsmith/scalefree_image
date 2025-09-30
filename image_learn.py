@@ -118,7 +118,7 @@ class ScaleInvariantImage(object):
             logging.info("Initialized new model.")
 
         self._model.compile(loss='mean_squared_error',
-                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=True, ema_momentum=0.99))  # default 0.001
+                            optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=False, ema_momentum=0.99))  # default 0.001
 
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
@@ -229,7 +229,7 @@ class ScaleInvariantImage(object):
         return r_px.astype(int)
 
 
-    def draw_div_units(self, ax, output_image=None, margin=0.1, plot_units=False):
+    def draw_div_units(self, ax, output_image=None, margin=0.1, plot_units=False, draw_flags=None):
         """
         # Draw a representation of the division units on the given axis.
         For line units: 
@@ -243,7 +243,6 @@ class ScaleInvariantImage(object):
         :param margin: The x and y limits will be [-1, +1] on the larger dimension,
             (-a-margin, a+margin)) on the smaller, where a is min(aspect, 1/aspect)
         """
-        img_ax= ax 
         
         aspect_ratio = self.image_train.shape[1] / self.image_train.shape[0]
         if aspect_ratio > 1:
@@ -269,7 +268,7 @@ class ScaleInvariantImage(object):
 
         image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
         if self._artists['output_image'] is None:
-            self._artists['output_image'] = img_ax.imshow(img_to_show, extent=image_extent)
+            self._artists['output_image'] = ax.imshow(img_to_show, extent=image_extent)
         else:
             self._artists['output_image'].set_data(img_to_show)
             self._artists['output_image'].set_extent(image_extent)
@@ -334,26 +333,29 @@ class ScaleInvariantImage(object):
 
             elif 'offsets' in params['linear']:
                 # 2 parameterization of the line (angle, offset from origin)
-                self._artists['linear']['center_points']= None  # Unused for 2-parameter lines
                 offsets = params['linear']['offsets']
-                angles = params['linear']['angles']
-                normals = np.vstack((np.cos(angles), np.sin(angles))).T
+                angles = params['linear']['angles']  
+                normals = np.vstack((np.cos(angles), 
+                                     -np.sin(angles))).T
                 for l_i in range(self.n_div['linear']):
                     n = normals[l_i]
                     d = offsets[l_i]
                     # point on line closest to origin:
                     c = n * d
-                    t = [-3.0, 3.0]
+                    t = [-4.0, 4.0]
                     dx = np.cos(angles[l_i])
                     dy = np.sin(angles[l_i])
-                    p0= c + t[0] * np.array([-dy, dx])
-                    p1= c + t[1] * np.array([-dy, dx])
+                    p0= c + t[0] * np.array([dy, dx])
+                    p1= c + t[1] * np.array([dy, dx])
+                    
+                    points = np.array((p0, p1))
+                    
                     
                     if len(self._artists['linear']['lines']) <= l_i:
-                        line, = ax.plot([p0[0], p1[0]], [-p0[1], -p1[1]], '-', color='blue', alpha=alpha, linewidth=line_width)
+                        line, = ax.plot(points[:,0], points[:,1], '-', color='red', alpha=alpha, linewidth=line_width)
                         self._artists['linear']['lines'].append(line)
                     else:
-                        self._artists['linear']['lines'][l_i].set_data([p0[0], p1[0]], [-p0[1], -p1[1]])
+                        self._artists['linear']['lines'][l_i].set_data(points[:,0], points[:,1])
         if 'circular' in params:
             
             centers = params['circular']['centers']# switch to (x,y)
@@ -362,7 +364,7 @@ class ScaleInvariantImage(object):
 
             if len(self._artists['circular']['center_points']) == 0:
                 self._artists['circular']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
-                                                                    'o', color='blue', markersize=4, alpha=alpha)[0])
+                                                                    'o', color='red', markersize=4, alpha=alpha)[0])
             else:
                 self._artists['circular']['center_points'][0].set_data(centers[:,0], centers[:,1])
             
@@ -370,7 +372,7 @@ class ScaleInvariantImage(object):
                 c = centers[i]
                 r = radii[i]
                 if len(self._artists['circular']['curves']) <= i:
-                    circle_inner = plt.Circle((c[0], c[1]), r, color='red', fill=False, alpha=alpha, linewidth=line_width)
+                    circle_inner = plt.Circle((c[0], c[1]), r, color='blue', fill=False, alpha=alpha, linewidth=line_width)
                     ax.add_artist(circle_inner)
                     self._artists['circular']['curves'].append(circle_inner)
                 else:
@@ -400,8 +402,6 @@ class ScaleInvariantImage(object):
         if True:#not self._lims_set:
             ax.set_xlim(np.array(x_lim))
             ax.set_ylim(np.array(y_lim))
-        img_ax.set_aspect('equal')
-        ax.set_aspect('equal')
         
 
     def _init_model(self):
@@ -485,7 +485,7 @@ class ScaleInvariantImage(object):
         
         return loss_history
 
-    def gen_image(self, output_shape, border=0.0, keep_aspect=True, div_color=None, div_thickness=None):
+    def gen_image(self, output_shape, border=0.0, keep_aspect=True, div_color_f=None, div_thickness=None):
 
         x, y = make_input_grid(output_shape, resolution=1.0, border=border, keep_aspect=keep_aspect)
         shape = x.shape
@@ -496,15 +496,15 @@ class ScaleInvariantImage(object):
                                                                                                    np.min(inputs[:, 1]),
                                                                                                    np.max(inputs[:, 1]),
                                                                                                    inputs.shape[0]))
-        rgb = self._model.predict(inputs, batch_size=32768, verbose=True)
+        rgb = self._model.predict(inputs, batch_size=65536, verbose=True)
         logging.info("Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
         img = cv2.merge((rgb[:, 0].reshape(shape[:2]), rgb[:, 1].reshape(shape[:2]), rgb[:, 2].reshape(shape[:2])))
         n_clipped = np.sum(img < 0) + np.sum(img > 1)
         logging.info("Display clipping:  %i (%.3f %%)" % (n_clipped, float(n_clipped)/img.size * 100.0))
         img[img < 0.] = 0.
         img[img > 1.] = 1.
-        
-        if div_color is not None:
+
+        if div_color_f is not None:
             ### render all divider units to the image
             
             # Draw white lines on this black image, then overlay on the output image
@@ -520,7 +520,7 @@ class ScaleInvariantImage(object):
 
                     for i in range(self.n_div['linear']):
                         c = centers[i]
-                        t = [-3.0, 3.0]
+                        t = [-4.0, 4.0]
                         dx = np.cos(angles[i])
                         dy = np.sin(angles[i])
                         p0 = c + t[0] * np.array([dy, dx])
@@ -536,25 +536,28 @@ class ScaleInvariantImage(object):
                     pass
                     # # 2 parameterization of the line (angle, offset from origin)
                     # self._artists['linear']['center_points']= None  # Unused for 2-parameter lines
-                    # offsets = params['linear']['offsets']
-                    # angles = params['linear']['angles']
-                    # normals = np.vstack((np.cos(angles), np.sin(angles))).T
-                    # for l_i in range(self.n_div['linear']):
-                    #     n = normals[l_i]
-                    #     d = offsets[l_i]
-                    #     # point on line closest to origin:
-                    #     c = n * d
-                    #     t = [-3.0, 3.0]
-                    #     dx = np.cos(angles[l_i])
-                    #     dy = np.sin(angles[l_i])
-                    #     p0= c + t[0] * np.array([-dy, dx])
-                    #     p1= c + t[1] * np.array([-dy, dx])
+                    offsets = params['linear']['offsets']
+                    angles = params['linear']['angles'] 
+                    normals = np.vstack((np.cos(angles), -np.sin(angles))).T
+                    for l_i in range(self.n_div['linear']):
+                        n = normals[l_i]
+                        d = offsets[l_i]
+                        # point on line closest to origin:
+                        c = n * d
+                        t = [-4.0, 4.0]
+                        dx = np.cos(angles[l_i])
+                        dy = np.sin(angles[l_i])
+                        p0= c + t[0] * np.array([dy, dx])
+                        p1= c + t[1] * np.array([dy, dx])
                         
-                    #     if len(self._artists['linear']['lines']) <= l_i:
-                    #         line, = ax.plot([p0[0], p1[0]], [-p0[1], -p1[1]], '-', color='blue', alpha=alpha, linewidth=line_width)
-                    #         self._artists['linear']['lines'].append(line)
-                    #     else:
-                    #         self._artists['linear']['lines'][l_i].set_data([p0[0], p1[0]], [-p0[1], -p1[1]])
+                        p0_px = self.unit_coords_to_pixels(p0.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                        p1_px = self.unit_coords_to_pixels(p1.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                        points = np.array((p0_px, p1_px))
+
+                        cv2.line(border_alpha_mask, points[0], points[1], color=255,
+                                 thickness=div_thickness if div_thickness is not None else 1, lineType=cv2.LINE_AA)
+                        
+                    
             if 'circular' in params:
                 centers = params['circular']['centers']# switch to (x,y)
                 centers[:,1] = -centers[:,1]
@@ -575,7 +578,7 @@ class ScaleInvariantImage(object):
             float_mask = border_alpha_mask.astype(img.dtype) / 255.0
            
             float_mask = np.repeat(float_mask[:, :, np.newaxis], 3, axis=2)
-            border_rgb = np.ones_like(img, dtype=np.float32) * np.array(div_color).reshape(1,1,3)
+            border_rgb = np.ones_like(img, dtype=np.float32) * np.array(div_color_f).reshape(1,1,3)
             imgb = img.copy()
             imgb = imgb * (1.0 - float_mask) + border_rgb * float_mask
             img = imgb
@@ -598,6 +601,7 @@ class ScaleInvariantImage(object):
                 'sharpness': self.sharpness,
                 'grad_sharpness': self.grad_sharpness
                 }
+        
         with open(model_filename, 'wb') as outfile:
             cp.dump(data, outfile, protocol=cp.HIGHEST_PROTOCOL)
 
@@ -678,6 +682,7 @@ class UIDisplay(object):
         self._metadata = []
         self.final_loss = None
         self._show_dividers = True
+        self._ui_flags = {n:False for n in range(10)}  # for keypress toggles
         self.div_render_params = div_render_params if div_render_params is not None else {}
         
         if learning_rate_final is not None:
@@ -728,7 +733,7 @@ class UIDisplay(object):
 
         self._just_image = just_image
         
-    def _set_image(self, img_filename, synth_name, image_size_wh = (64, 48)):
+    def _set_image(self, img_filename, synth_name, image_size_wh = (64, 32+16)):
         """
         disambiguate, load  / generate image
         :param img_filename: path to image file
@@ -948,6 +953,11 @@ class UIDisplay(object):
             self._show_weight_contours = not self._show_weight_contours
             logging.info("Toggled weight contour display:  %s" % ("on" if self._show_weight_contours else "off",))   
             self._update_plots = True
+        elif event.key in [str(n) for n in range(10)]:
+            n = int(event.key)
+            self._ui_flags[n] = not self._ui_flags[n]
+            logging.info("Toggled UI flag %i to:  %s" % (n, "on" if self._ui_flags[n] else "off"))
+            self._update_plots = True
         else:
             logging.info("Unassigned key: %s" % (event.key,))
         
@@ -972,7 +982,7 @@ class UIDisplay(object):
             loss = self._train_thread(max_iter = debug_epochs_nothread)
             self._output_image = self._gen_image()
             fig, ax = plt.subplots(1,1)
-            self._sim.draw_div_units(ax=ax, output_image=self._output_image, plot_units=True)
+            self._sim.draw_div_units(ax=ax, output_image=self._output_image, plot_units=True, draw_flags=self._ui_flags)
             plt.show()
             self._worker = None
         else:
@@ -1106,6 +1116,8 @@ class UIDisplay(object):
                 out_unit_ax.set_title("Output image, model %s\n%s" % (div_units_str, cmd), fontsize=10)
                 # turn off x and y axes
                 out_unit_ax.axis("off")
+                # set aspect equal
+                
 
                         
                 if artists['out_img'] is None:
@@ -1305,7 +1317,7 @@ def get_args():
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("-w", "--weigh_center", 
                         help="Weigh pixels nearer the center higher during training by this r_inner, r_outer, lr_max, and x, y offsets.",
-                        nargs=5, type=float, default=[1.0, 2.0])
+                        nargs=5, type=float, default=[])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parser.add_argument('-d', '--render_dividers', type=int, nargs=4, default=None, 
@@ -1319,18 +1331,22 @@ def get_args():
     
     if parsed.render_dividers is not None:
         div_render = {'div_thickness': int(parsed.render_dividers[0]), 
-                      'div_color': (int(parsed.render_dividers[1]), 
-                                           int(parsed.render_dividers[2]), 
-                                           int(parsed.render_dividers[3]))}
+                      'div_color_f': ((parsed.render_dividers[1]/255.0), 
+                                      (parsed.render_dividers[2]/255.0), 
+                                      (parsed.render_dividers[3]/255.0))}
     else:
         div_render = None
+        
     if len(parsed.weigh_center) == 5:
         center_weight = {'w_max': parsed.weigh_center[0], 
                          'r_inner': parsed.weigh_center[1],
                          'r_outer': parsed.weigh_center[2],  
                          'offsets_xy_rel': (parsed.weigh_center[3], parsed.weigh_center[4])}
     elif len(parsed.weigh_center) != 0:
+        print(parsed.weigh_center)
         raise Exception("If using --weigh_center, must provide 5 values:  r_inner, r_outer, w_max, x_offset_rel, y_offset_rel")
+    else:
+        center_weight = None
     
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,

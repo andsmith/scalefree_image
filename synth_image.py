@@ -123,6 +123,12 @@ class TestImageMaker(object):
         center = self._noisy_offset(np.zeros(2))
         mask = self._make_line_mask(angle, center)
         return self._mask_to_image_gray(mask)
+
+    def _synth_bw_line_static(self):
+        angle = np.pi/2 -np.pi/16# np.random.uniform(0, np.pi/8)
+        center = np.array([0.5, 0.0])
+        mask = self._make_line_mask(angle, center)
+        return self._mask_to_image_color(mask)
     
     # The next three methods have (n) lines at roughly equally spaced angles.
     def _synth_bw_lines_2_rand(self):

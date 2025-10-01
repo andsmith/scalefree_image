@@ -15,9 +15,9 @@ import cv2
 import json
 GREEN = (0, 255, 0)
 RED = (255, 0, 0)
-VERBOSE=False
+VERBOSE=True
 
-trial_cache_dir = "trial_cache"
+trial_cache_dir = "trial_cache_new"
 
 class Experiment(object):
     """
@@ -98,8 +98,8 @@ class Experiment(object):
             with open(raw_filename, "rb") as f:
                 self.results_raw = pickle.load(f)
                 logging.info(f"Loaded raw results from {raw_filename}")
-            
-            #self._process_results()
+
+        
         self._process_results()
         
         
@@ -179,7 +179,7 @@ class Experiment(object):
             scores.append(score)
             masks.append(close_mask)
             
-            print("Train mask shape: ", close_mask.shape, "out_small shape: ", small_output.shape, "score: %.4f" % score, 'loss', np.mean((small_output.astype(np.float32)-train_image.astype(np.float32))**2))
+            # print("Train mask shape: ", close_mask.shape, "out_small shape: ", small_output.shape, "score: %.4f" % score, 'loss', np.mean((small_output.astype(np.float32)-train_image.astype(np.float32))**2))
 
         scores = np.array(scores)
         
@@ -571,7 +571,7 @@ def params_to_cache_filename(params, test_image, trial_ind):
                     'learning_rate_final': 'rf%5f',
                     'epochs_per_cycle': 'e%i',
                     'run_cycles': 'k%i',
-                    'grad_sharpness': 'g%.1f',
+                    'gradient_sharpness': 'g%.1f',
                     'n_hidden': 'n%i',
                     'n_structure': 't%i',                
         }
@@ -605,7 +605,6 @@ def run_trial(test_params, trial_ind, const_params):
     del params['_image_file']
     del params['_test_image']
     del params['_model_file']
-    params['nogui'] = True
     
     params_cache_file = os.path.join(trial_cache_dir, params_to_cache_filename(params, test_image, trial_ind))
     if not os.path.exists(params_cache_file):
@@ -638,8 +637,8 @@ COMMON_PARAMS_stochastic = {'_image_file': None,
               'batch_size': 8,
               'border': 0.0,
               'center_weight_params': None,
-              'display_multiplier': 5.0,
-              'downscale': 2.0,
+              'display_multiplier': 5.0,  # keep big so training image can be shown as an inset in the output image.
+              'downscale': 4.0,
               'frame_dir': None,
               'just_image': None,
               'learning_rate': 1.0,
@@ -653,6 +652,25 @@ COMMON_PARAMS_stochastic = {'_image_file': None,
               
     }
 
+def n_struct_and_color_from_n_units(n_units):
+    n_structure = max(5, n_units*4)
+    n_color = max(n_structure // 3, 3)
+    return n_structure, n_color
+
+def plot_n_units():
+    n_units = np.arange(1,512)
+    vals = [n_struct_and_color_from_n_units(n) for n in n_units]
+    struct = np.array([v[0] for v in vals])
+    color = np.array([v[1] for v in vals])
+    plt.plot(n_units, struct, label='n_structure')
+    plt.plot(n_units, color, label='n_color')   
+    plt.xlabel("n_units (circle or line units)")
+    plt.ylabel("Number of units")
+    plt.title("Recommended n_structure and n_color vs n_units")
+    plt.legend()
+    plt.grid()
+    plt.show()
+    
 def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True):
     params = COMMON_PARAMS_stochastic.copy()   
     
@@ -661,7 +679,7 @@ def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True):
     params['_test_image'] = test_image
     
     # varying parameters:
-    var_param_names = ['grad_sharpness' ]
+    var_param_names = ['gradient_sharpness' ]
     var_param_values = [[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0]] 
     n_neurons = (n_circles) * (n_circles +1) //2 + n_circles + int(np.ceil(n_circles/2)) 
 
@@ -719,7 +737,7 @@ def run_experiment_lines(test_image, line_params, n_lines, n_trials = 15, save_f
     print("N_LINES = %i  ->  USING %i STRUCTURE AND HIDDEN NEURONS" % (n_lines, n_neurons))
     
     
-    var_param_names = ['grad_sharpness']
+    var_param_names = ['gradient_sharpness']
     var_param_values = [[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0]]
     
     # DEBUG, for faster running:
@@ -753,27 +771,111 @@ def run_experiment_lines(test_image, line_params, n_lines, n_trials = 15, save_f
         logging.info(f"Saved figure to {fig_filename}")
         
 
+COMMON_PARAMS = {'_image_file': None,
+                 '_model_file': None,
+                 'batch_size': 64,
+                 'border': 0.0,
+                 'center_weight_params': None,
+                 'display_multiplier': 5.0,  # make bigger so training image can be shown as inset
+                 'downscale': 2.0,  # shrinks test image size in image_learn.py, param 'image_size_wh' to set_image()
+                 'frame_dir': None,
+                 'just_image': None,
+                 'learning_rate': 10.0,
+                 'learning_rate_final': 0.001,
+                 'epochs_per_cycle': 25,
+                 'sharpness': 1000.0,
+                 'nogui': True,
+                 # OTHER PARAMS SET BY EXPERIMENT
+    }
+
+def run_experiment(test_image, n_circles=0, n_lines=0, line_params=3, run_cycles=20, downscale=None, n_trials=15, save_fig=True, n_cpu=14):
+    params = COMMON_PARAMS.copy()   
+    
+    # Custom for this experiment but constant:
+    params['n_div'] = {'circular': n_circles, 'linear': n_lines, 'sigmoid': 0}
+    params['_test_image'] = test_image
+    params['line_params'] = line_params
+    params['run_cycles'] = run_cycles
+    if downscale is not None:
+        params['downscale'] = downscale
+
+    # varying parameters:
+    var_param_names = ['gradient_sharpness' ]
+    var_param_values = [[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0]] 
+    n_struct, n_color = n_struct_and_color_from_n_units(n_circles + n_lines)
+
+    params['n_structure'] = n_struct
+    params['n_hidden'] = n_struct
+    print("N_CIRCLES = %i  -->  USING %i STRUCTURE AND HIDDEN NEURONS" % (n_circles, n_struct))
+
+    exp_name = "test_%s_C=%i_L=%i_lp%i" % (test_image, n_circles, n_lines, line_params)
+    experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
+    experiment.run(n_cpu=n_cpu)
+    fig = experiment.plot(fig_size=(9,12))
+    
+    
+    if not save_fig:
+        plt.show()
+    else:
+        # Save the figure
+        fig_filename = "%s_results.png" % (exp_name,)
+        fig.savefig(fig_filename, dpi=300)
+        logging.info(f"Saved figure to {fig_filename}")
+        
+    fig = experiment.plot_summary()
+    if not save_fig:
+        plt.show()
+    else:
+        # Save the figure
+        fig_filename = "%s_summary.png" % (exp_name,)
+        fig.savefig(fig_filename, dpi=300)
+        logging.info(f"Saved figure to {fig_filename}")
+
 
 def run_experiments():
     
-    run_experiment_circles(n_circles = 1, test_image = 'circle_center')
-    run_experiment_circles(n_circles = 2, test_image = 'circles_2_rand')
-    run_experiment_circles(n_circles = 3, test_image = 'circles_3_rand')
-    run_experiment_circles(n_circles = 4, test_image = 'circles_4_rand')
+    # run_experiment_circles(n_circles = 1, test_image = 'circle_center')
+    # run_experiment_circles(n_circles = 2, test_image = 'circles_2_rand')
+    # run_experiment_circles(n_circles = 3, test_image = 'circles_3_rand')
+    # run_experiment_circles(n_circles = 4, test_image = 'circles_4_rand')
     
-    run_experiment_lines(line_params=2, n_lines=1, test_image = 'line_rand')
-    run_experiment_lines(line_params=2, n_lines=4, test_image = 'lines_4_rand')
-    run_experiment_lines(line_params=2, n_lines=2, test_image = 'lines_2_rand')
-    run_experiment_lines(line_params=2, n_lines=3, test_image = 'lines_3_rand')
+    # run_experiment_lines(line_params=2, n_lines=1, test_image = 'line_rand')
+    # run_experiment_lines(line_params=2, n_lines=4, test_image = 'lines_4_rand')
+    # run_experiment_lines(line_params=2, n_lines=2, test_image = 'lines_2_rand')
+    # run_experiment_lines(line_params=2, n_lines=3, test_image = 'lines_3_rand')
 
-    run_experiment_lines(line_params=3, n_lines=1, test_image = 'line_rand')
-    run_experiment_lines(line_params=3, n_lines=2, test_image = 'lines_2_rand')
-    run_experiment_lines(line_params=3, n_lines=3, test_image = 'lines_3_rand')
-    run_experiment_lines(line_params=3, n_lines=4, test_image = 'lines_4_rand')
+    # run_experiment_lines(line_params=3, n_lines=1, test_image = 'line_rand')
+    # run_experiment_lines(line_params=3, n_lines=2, test_image = 'lines_2_rand')
+    # run_experiment_lines(line_params=3, n_lines=3, test_image = 'lines_3_rand')
+    # run_experiment_lines(line_params=3, n_lines=4, test_image = 'lines_4_rand')
 
+    run_experiment(n_circles=1, test_image = 'bw_circle_rand')    
+    run_experiment(n_circles=2, test_image = 'bw_circles_2_rand')
+    run_experiment(n_circles=3, test_image = 'bw_circles_3_rand')
+    run_experiment(n_circles=4, test_image = 'bw_circles_4_rand')
+    run_experiment(n_circles=5, test_image = 'c_circles_5_rand')
+    run_experiment(n_circles=15, test_image = 'c_circles_15_rand')
     
+    run_experiment(n_lines=1, line_params=3, test_image = 'bw_line_rand')
+    run_experiment(n_lines=2, line_params=3, test_image = 'bw_lines_2_rand')
+    run_experiment(n_lines=3, line_params=3, test_image = 'bw_lines_3_rand')
+    run_experiment(n_lines=4, line_params=3, test_image = 'bw_lines_4_rand')
+    run_experiment(n_lines=5, line_params=3, test_image = 'c_lines_5_rand')
+    run_experiment(n_lines=15, line_params=3, test_image = 'c_lines_15_rand')
     
+    run_experiment(n_lines=1, line_params=2, test_image = 'bw_line_rand')
+    run_experiment(n_lines=2, line_params=2, test_image = 'bw_lines_2_rand')
+    run_experiment(n_lines=3, line_params=2, test_image = 'bw_lines_3_rand')
+    run_experiment(n_lines=4, line_params=2, test_image = 'bw_lines_4_rand')
+    run_experiment(n_lines=5, line_params=2, test_image = 'c_lines_5_rand')
+    run_experiment(n_lines=15, line_params=2, test_image = 'c_lines_15_rand')
     
+    run_experiment(n_circles=3, n_lines=3, line_params=3, test_image = 'mix_A_3_3_rand')
+    run_experiment(n_circles=7, n_lines=7, line_params=3, test_image = 'mix_B_7_7_rand')
+    run_experiment(n_circles=16, n_lines=16, line_params=3, downscale=1.0, run_cycles=100, test_image = 'mix_C_16_rand')
+    run_experiment(n_circles=64, n_lines=64, line_params=3, downscale=1.0, run_cycles=100, test_image = 'mix_D_64_rand')
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    run_experiments()
+    run_experiments()  

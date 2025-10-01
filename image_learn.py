@@ -733,7 +733,7 @@ class UIDisplay(object):
 
         self._just_image = just_image
         
-    def _set_image(self, img_filename, synth_name, image_size_wh = (64, 32+16)):
+    def _set_image(self, img_filename, synth_name, image_size_wh = (2*64, 2*(32+16))):
         """
         disambiguate, load  / generate image
         :param img_filename: path to image file

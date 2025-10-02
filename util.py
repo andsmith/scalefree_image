@@ -287,10 +287,120 @@ def test_pairwise_hamming():
     dist = pairwise_hamming(a, b)
     print("Hamming distances:\n", dist)
 
+def find_boundary_pixels(mask):
+    """
+    True value indicates inside the region. 
+    Return a mask for every pixel touching a non-region pixel.
+    Don't forget the borders of the image, which some regions will touch.
+    """
+    h, w = mask.shape
+    boundary_x = (mask[1:,:] != mask[:-1,:]) | \
+                 (mask[:-1,:] != mask[1:,:]) 
+    boundary_y = (mask[:,1:] != mask[:,:-1]) | \
+                 (mask[:,:-1] != mask[:,1:])
+    bm_temp = np.zeros_like(mask, dtype=bool)
+    bm_temp[1:,:] |= boundary_x
+    bm_temp[:-1,:] |= boundary_x
+    bm_temp[:,1:] |= boundary_y
+    bm_temp[:,:-1] |= boundary_y
+    
+    # Keep border True:
+    # bm_temp[0,:] |= True
+    # bm_temp[-1,:] |= True
+    # bm_temp[:,0] |= True
+    # bm_temp[:,-1] |= True
+    
+    # Keep border True if mask was true at that border location:
+    # bm_temp[0,:] |= mask[0,:]
+    # bm_temp[-1,:] |= mask[-1,:]
+    # bm_temp[:,0] |= mask[:,0]
+    # bm_temp[:,-1] |= mask[:,-1]
+    
+    print("Mean boundary mask value:", bm_temp.mean())
+    return np.where(bm_temp)
+
+def pixels_in_bbox(bbox, pixels_xy):
+    """
+    Return true if at least one of the pixels is in the bounding box.
+    :param bbox: {'x':(x_min, y_min), 'y': (x_max, y_max)}
+    :param pixels_xy: N x 2 array of pixel coordinates
+    """
+    print(pixels_xy.shape)
+    x_min, y_min, x_max, y_max = bbox['x'][0], bbox['y'][0], bbox['x'][1], bbox['y'][1]
+    inside = np.any((pixels_xy[:,0] >= x_min) & (pixels_xy[:,0] <= x_max) &
+                    (pixels_xy[:,1] >= y_min) & (pixels_xy[:,1] <= y_max))
+    return inside
+
+def test_pixels_in_bbox():
+    img_size = (100, 100)
+    bbox =  {'x':(65, 95), 'y': (5, 95)}
+    x_min, y_min, x_max, y_max = bbox['x'][0], bbox['y'][0], bbox['x'][1], bbox['y'][1] 
+    n_tests = 10
+    test_size = 5
+    spread = 10
+    points, results = [], []
+    for _ in range(n_tests):
+        center = np.random.rand(2) * img_size
+        dpoints = np.random.randn(test_size, 2) * spread + center
+        dpoints = np.clip(dpoints, 0, np.array(img_size)-1).astype(int)
+        result = pixels_in_bbox(bbox, dpoints)
+        points.append(dpoints)
+        results.append(result)
+        
+    points = np.vstack(points)
+    results = np.array(results)
+    
+    # plot bbox
+    plt.plot([x_min, x_max, x_max, x_min, x_min], [y_min, y_min, y_max, y_max, y_min],'-')
+    
+    # plot point sets in different colors, X for outside, O for inside
+    for i in range(n_tests):
+        pts = points[i*test_size:(i+1)*test_size]
+        if results[i]:
+            plt.plot(pts[:,0], pts[:,1], 'o')
+        else:
+            plt.plot(pts[:,0], pts[:,1], 'x')
+            
+    plt.xlim(0, img_size[0])
+    plt.ylim(0, img_size[1])
+    plt.gca().set_aspect('equal', adjustable='box')
+    plt.title("Pixels in bbox test")
+    plt.show()
+    
+def test_find_boundary_pixels():
+    mask = np.zeros((20,20), dtype=bool)
+    x, y = make_input_grid((mask.shape[0], mask.shape[1]), resolution=1.0, keep_aspect=True)
+    c=0.23, -.4
+    r = .3432
+    circle = (x - c[0])**2 + (y - c[1])**2 < r**2
+    mask |= circle
+    mask[:4,:] = True
+    mask[:,:5] = True
+    # mask = ~ mask
+    boundary = find_boundary_pixels(mask)
+    
+    img = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+    # img[mask, :] = (155, 0,0)
+    img[boundary] = np.array([0, 155, 0], dtype=np.uint8)
+    
+    plt.figure(figsize=(8,4))
+    plt.subplot(1,2,1)
+    plt.title("Mask")
+    plt.imshow(mask, cmap='gray')
+    plt.axis('off')
+    plt.subplot(1,2,2)
+    plt.title("Boundary Pixels")
+    plt.imshow(img)
+    plt.axis('off')
+    plt.show()
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     #test_captioned_frame()
     # test_add_text()
     # test_make_input_grid()
-    test_make_central_weights()
+    #test_make_central_weights()
+    # test_pairwise_hamming()
+    # test_find_boundary_pixels()
+    test_pixels_in_bbox()
     logging.info("All tests passed.")

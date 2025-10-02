@@ -211,7 +211,7 @@ class Experiment(object):
             # Add spacing between rows
             for ax in axs.flatten():
                 ax.axis('off')  
-            plt.suptitle(f"Rescoring outputs for {title}\npct_thresh={self._close_pixel_thresh*100:.1f}%", fontsize=16)
+            plt.suptitle(f"Rescoring outputs for {title}\npct_thresh={self._close_pixel_thresh*100:.1f}%", fontsize=14)
             plt.tight_layout()
             fig.subplots_adjust(wspace=0.0, hspace=0.1)
             plt.show()
@@ -432,7 +432,7 @@ class Experiment(object):
             title = "Test(cols):  %s = %s\nTest(rows): %s = %s\n" % (self.var_param_names[0], var_str_1,
                                                                      self.var_param_names[1], var_str_2)
             #title += f"each experiment over {self.n_trials} trials, green insets show training image."
-            plt.suptitle(title, fontsize=16)
+            plt.suptitle(title, fontsize=14)
             
 
         elif len(self.var_param_names) == 1:
@@ -480,12 +480,12 @@ class Experiment(object):
 
             plt.suptitle("Test:  %s = %s" % (self.var_param_names[0], get_var_str(self.var_param_values[0])) +
                          f"\neach experiment over {self.n_trials} trials, green insets show training image.\n"
-                         , fontsize=17)
+                         , fontsize=14)
             plt.tight_layout()
             
         return fig      
     
-    def plot_summary(self, fig_size=(12, 5)):
+    def plot_summary(self, axs):
         """
         Plot a summary of all experiments, this is the plot to make the recommendation clear, if the experiment is to have 
         revealed anything at all.
@@ -509,7 +509,7 @@ class Experiment(object):
         var_param_values = self.var_param_values[0]
         
         n_cols = len(var_param_values)
-        fig, axs = plt.subplots(nrows=1, ncols=2, figsize=fig_size,gridspec_kw={'width_ratios': [1, 5]})
+        #fig, axs = plt.subplots(nrows=1, ncols=2, figsize=fig_size,gridspec_kw={'width_ratios': [1, 5]})
         
         # training image:
         axs[0].imshow(self.stats[0]['train_images'][0])
@@ -521,36 +521,40 @@ class Experiment(object):
         n_passing = [np.sum(stat['scores'] >= self._passing_score_thresh) for stat in self.stats]
         axs[1].bar(range(n_cols), n_passing, color='skyblue')
         axs[1].set_xticks(range(n_cols))
-        axs[1].set_xticklabels([str(v) for v in var_param_values])
-        axs[1].set_ylabel("Number of Passing Trials", fontsize=14)
-        axs[1].set_xlabel(f"{var_param_name}", fontsize=18)
+        axs[1].set_xticklabels(["%.1f"%(v,) for v in var_param_values])
+        axs[1].set_ylabel("N Passing Trials", fontsize=12)
+        axs[1].set_xlabel(f"{var_param_name}", fontsize=13)
         axs[1].set_ylim(0, self.n_trials)
-        axs[1].set_title(f"Passing criterion:  at least {self._passing_score_thresh*100:.1f}% of pixels within {self._close_pixel_thresh*100:.1f}% of training image's RGB values.")
-        data_line = f"Test case:  {self.const_params['_test_image']}"
-        units_str = "Circle-units:  %i" % (self.const_params['n_div']['circular'],) if self.const_params['n_div']['circular'] > 0 else \
-                "Line-units:  %i  (%i param.)" % (self.const_params['n_div']['linear'], self.const_params['line_params'])
-        arch_str = f"Structure-units:  {self.const_params['n_structure']},  Color-units:  {self.const_params['n_hidden']}"
-        network_line = f"Network:  {units_str},  {arch_str}"
-        title = f"{data_line}\n{network_line}\n"
+        data_line = f""#Test case:  {self.const_params['_test_image']}\n"
+        title = f"{data_line}"
         title += f"Training: batch size {self.const_params['batch_size']}, annealing {self.const_params['run_cycles']} cycles of {self.const_params['epochs_per_cycle']} epochs,"
         title += f"learning-rate init={self.const_params['learning_rate']}, final={self.const_params['learning_rate_final']}\n"
-
+        title += f"Passing criterion:  at least {self._passing_score_thresh*100:.1f}% of pixels within {self._close_pixel_thresh*100:.1f}% of training image's RGB values.\n"
         title += f"Experimental param:  {var_param_name} = {get_var_str(var_param_values)}\n"
         title += f"Num Trials:  {self.n_trials} per parameter value."
         # make more room between axes
-        fig.subplots_adjust(wspace=0.4)
+        # fig.subplots_adjust(wspace=0.4)
         # move top of the bar graph down to make room for title
         box = axs[1].get_position() # get the original position
         axs[1].set_position([box.x0, box.y0, box.width, box.height * 0.7])
         
-        plt.suptitle(title, fontsize=14,x=0.05, horizontalalignment='left')
-        return fig
+        units_str = "Circle-units:  %i" % (self.const_params['n_div']['circular'],) if self.const_params['n_div']['circular'] > 0 else \
+                    "Line-units:  %i  (%i param.)" % (self.const_params['n_div']['linear'], self.const_params['line_params'])
+        arch_str = f"Structure-units:  {self.const_params['n_structure']},  Color-units:  {self.const_params['n_hidden']}"
+        network_line = f"Network:  {units_str},\n{arch_str}"
+        axs_title = network_line + "\n" 
+        
+        axs[1].set_title(axs_title, fontsize=10, y=.88)
+        
+        
+        plt.suptitle(title, fontsize=10, x=0.05, horizontalalignment='left')
+        # return fig
     
     
 def get_var_str(values):
 
     if isinstance(values[0], float):
-        par_val_str = {", ".join(["%.3f" % v for v in values])}
+        par_val_str = {", ".join(["%.1f" % v for v in values])}
     elif isinstance(values[0], int):
         par_val_str = {", ".join([str(v) for v in values])}
     elif isinstance(values[0], str):
@@ -671,7 +675,7 @@ def plot_n_units():
     plt.grid()
     plt.show()
     
-def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True):
+def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True, axes=None):
     params = COMMON_PARAMS_stochastic.copy()   
     
     # Custom for this experiment but constant:
@@ -697,25 +701,24 @@ def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True):
     exp_name = "test_%s_Circles=%i" % (test_image, n_circles)
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
     experiment.run()
-    fig = experiment.plot(fig_size=(9,12))
     
-    
-    if not save_fig:
-        plt.show()
-    else:
-        # Save the figure
-        fig_filename = "%s_results.png" % (exp_name,)
-        fig.savefig(fig_filename, dpi=300)
-        logging.info(f"Saved figure to {fig_filename}")
+    # fig = experiment.plot(fig_size=(9,12))
+    # if not save_fig:
+    #     plt.show()
+    # else:
+    #     # Save the figure
+    #     fig_filename = "%s_results.png" % (exp_name,)
+    #     fig.savefig(fig_filename, dpi=300)
+    #     logging.info(f"Saved figure to {fig_filename}")
         
-    fig = experiment.plot_summary()
-    if not save_fig:
-        plt.show()
-    else:
-        # Save the figure
-        fig_filename = "%s_summary.png" % (exp_name,)
-        fig.savefig(fig_filename, dpi=300)
-        logging.info(f"Saved figure to {fig_filename}")
+    experiment.plot_summary(axs=axes)
+    # if not save_fig:
+    #     plt.show()
+    # else:
+    #     # Save the figure
+    #     fig_filename = "%s_summary.png" % (exp_name,)
+    #     fig.savefig(fig_filename, dpi=300)
+    #     logging.info(f"Saved figure to {fig_filename}")
 
 # BATCH version:
 # COMMON_PARAMS_BATCH = COMMON_PARAMS_stochastic.copy()
@@ -724,7 +727,7 @@ def run_experiment_circles(test_image, n_circles, n_trials = 15, save_fig=True):
 #                      'run_cycles': 4})
 
 
-def run_experiment_lines(test_image, line_params, n_lines, n_trials = 15, save_fig=True):
+def run_experiment_lines(test_image, line_params, n_lines, n_trials = 15, save_fig=True, axes=None):
     params = COMMON_PARAMS_stochastic.copy()
     
     params['n_div'] = {'circular': 0, 'linear': n_lines, 'sigmoid': 0}
@@ -752,23 +755,23 @@ def run_experiment_lines(test_image, line_params, n_lines, n_trials = 15, save_f
     experiment.run()
     
     
-    fig = experiment.plot()
-    if not save_fig:
-        plt.show()
-    else:
-        # Save the figure
-        fig_filename = "%s_results.png" % (exp_name,)
-        fig.savefig(fig_filename, dpi=300)
-        logging.info(f"Saved figure to {fig_filename}")
+    # fig = experiment.plot()
+    # if not save_fig:
+    #     plt.show()
+    # else:
+    #     # Save the figure
+    #     fig_filename = "%s_results.png" % (exp_name,)
+    #     fig.savefig(fig_filename, dpi=300)
+    #     logging.info(f"Saved figure to {fig_filename}")
         
-    fig = experiment.plot_summary()
-    if not save_fig:
-        plt.show()
-    else:
-        # Save the figure
-        fig_filename = "%s_summary.png" % (exp_name,)
-        fig.savefig(fig_filename, dpi=300)
-        logging.info(f"Saved figure to {fig_filename}")
+    experiment.plot_summary(axs=axes)
+    # if not save_fig:
+    #     plt.show()
+    # else:
+    #     # Save the figure
+    #     fig_filename = "%s_summary.png" % (exp_name,)
+    #     fig.savefig(fig_filename, dpi=300)
+    #     logging.info(f"Saved figure to {fig_filename}")
         
 
 COMMON_PARAMS = {'_image_file': None,
@@ -788,7 +791,7 @@ COMMON_PARAMS = {'_image_file': None,
                  # OTHER PARAMS SET BY EXPERIMENT
     }
 
-def run_experiment(test_image, n_circles=0, n_lines=0, line_params=3, run_cycles=20, downscale=None, n_trials=15, save_fig=True, n_cpu=14):
+def run_experiment(test_image, n_circles=0, n_lines=0, line_params=3, run_cycles=20, downscale=None, n_trials=15, save_fig=True, n_cpu=14, axes=None):
     params = COMMON_PARAMS.copy()   
     
     # Custom for this experiment but constant:
@@ -811,25 +814,28 @@ def run_experiment(test_image, n_circles=0, n_lines=0, line_params=3, run_cycles
     exp_name = "test_%s_C=%i_L=%i_lp%i" % (test_image, n_circles, n_lines, line_params)
     experiment = Experiment(params, var_param_names, var_param_values, n_trials=n_trials, cache_prefix=exp_name)
     experiment.run(n_cpu=n_cpu)
-    fig = experiment.plot(fig_size=(9,12))
     
     
-    if not save_fig:
-        plt.show()
-    else:
-        # Save the figure
-        fig_filename = "%s_results.png" % (exp_name,)
-        fig.savefig(fig_filename, dpi=300)
-        logging.info(f"Saved figure to {fig_filename}")
+    
+    # fig = experiment.plot(fig_size=(9,12))
+    
+    
+    # if not save_fig:
+    #     plt.show()
+    # else:
+    #     # Save the figure
+    #     fig_filename = "%s_results.png" % (exp_name,)
+    #     fig.savefig(fig_filename, dpi=300)
+    #     logging.info(f"Saved figure to {fig_filename}")
         
-    fig = experiment.plot_summary()
-    if not save_fig:
-        plt.show()
-    else:
-        # Save the figure
-        fig_filename = "%s_summary.png" % (exp_name,)
-        fig.savefig(fig_filename, dpi=300)
-        logging.info(f"Saved figure to {fig_filename}")
+    fig = experiment.plot_summary(axs=axes)
+    # if not save_fig:
+    #     plt.show()
+    # else:
+    #     # Save the figure
+    #     fig_filename = "%s_summary.png" % (exp_name,)
+    #     fig.savefig(fig_filename, dpi=300)
+    #     logging.info(f"Saved figure to {fig_filename}")
 
 
 def run_experiments():
@@ -848,32 +854,65 @@ def run_experiments():
     # run_experiment_lines(line_params=3, n_lines=2, test_image = 'lines_2_rand')
     # run_experiment_lines(line_params=3, n_lines=3, test_image = 'lines_3_rand')
     # run_experiment_lines(line_params=3, n_lines=4, test_image = 'lines_4_rand')
+    
 
-    run_experiment(n_circles=1, test_image = 'bw_circle_rand')    
-    run_experiment(n_circles=2, test_image = 'bw_circles_2_rand')
-    run_experiment(n_circles=3, test_image = 'bw_circles_3_rand')
-    run_experiment(n_circles=4, test_image = 'bw_circles_4_rand')
-    run_experiment(n_circles=5, test_image = 'c_circles_5_rand')
-    run_experiment(n_circles=15, test_image = 'c_circles_15_rand')
+
+    fig, axs = plt.subplots(nrows=6, ncols=2, figsize=(10, 12), constrained_layout=True)
+    run_experiment(n_circles=1, test_image = 'bw_circle_rand', axes=axs[0, :])
+    run_experiment(n_circles=2, test_image = 'bw_circles_2_rand', axes=axs[1, :])
+    run_experiment(n_circles=3, test_image = 'bw_circles_3_rand', axes=axs[2, :])
+    run_experiment(n_circles=4, test_image = 'bw_circles_4_rand', axes=axs[3, :])
+    run_experiment(n_circles=5, test_image = 'c_circles_5_rand' , axes=axs[4, :])
+    run_experiment(n_circles=15, test_image = 'c_circles_15_rand', axes=axs[5, :])
+    save_fig(fig, axs, "Experiment_circles_summary.png")
     
-    run_experiment(n_lines=1, line_params=3, test_image = 'bw_line_rand')
-    run_experiment(n_lines=2, line_params=3, test_image = 'bw_lines_2_rand')
-    run_experiment(n_lines=3, line_params=3, test_image = 'bw_lines_3_rand')
-    run_experiment(n_lines=4, line_params=3, test_image = 'bw_lines_4_rand')
-    run_experiment(n_lines=5, line_params=3, test_image = 'c_lines_5_rand')
-    run_experiment(n_lines=15, line_params=3, test_image = 'c_lines_15_rand')
+    fig, axs = plt.subplots(nrows=6, ncols=2, figsize=(10, 12), constrained_layout=True)
+    run_experiment(n_lines=1, line_params=3, test_image = 'bw_line_rand', axes=axs[0, :])
+    run_experiment(n_lines=2, line_params=3, test_image = 'bw_lines_2_rand', axes=axs[1, :])
+    run_experiment(n_lines=3, line_params=3, test_image = 'bw_lines_3_rand', axes=axs[2, :])
+    run_experiment(n_lines=4, line_params=3, test_image = 'bw_lines_4_rand', axes=axs[3, :])
+    run_experiment(n_lines=5, line_params=3, test_image = 'c_lines_5_rand', axes=axs[4, :])
+    run_experiment(n_lines=15, line_params=3, test_image = 'c_lines_15_rand', axes=axs[5, :])
+    save_fig(fig, axs, "Experiment_lines_3-Param_summary.png")
+
+    fig, axs = plt.subplots(nrows=6, ncols=2, figsize=(10, 12), constrained_layout=True)
+    run_experiment(n_lines=1, line_params=2, test_image = 'bw_line_rand', axes=axs[0, :])
+    run_experiment(n_lines=2, line_params=2, test_image = 'bw_lines_2_rand', axes=axs[1, :])
+    run_experiment(n_lines=3, line_params=2, test_image = 'bw_lines_3_rand' , axes=axs[2, :])
+    run_experiment(n_lines=4, line_params=2, test_image = 'bw_lines_4_rand', axes=axs[3, :])
+    run_experiment(n_lines=5, line_params=2, test_image = 'c_lines_5_rand', axes=axs[4, :])
+    run_experiment(n_lines=15, line_params=2, test_image = 'c_lines_15_rand', axes=axs[5, :])
+    save_fig(fig, axs, "Experiment_lines_2-Param_summary.png")
     
-    run_experiment(n_lines=1, line_params=2, test_image = 'bw_line_rand')
-    run_experiment(n_lines=2, line_params=2, test_image = 'bw_lines_2_rand')
-    run_experiment(n_lines=3, line_params=2, test_image = 'bw_lines_3_rand')
-    run_experiment(n_lines=4, line_params=2, test_image = 'bw_lines_4_rand')
-    run_experiment(n_lines=5, line_params=2, test_image = 'c_lines_5_rand')
-    run_experiment(n_lines=15, line_params=2, test_image = 'c_lines_15_rand')
+    fig, axs = plt.subplots(nrows=3, ncols=2, figsize=(10, 6), constrained_layout=True)
+    run_experiment(n_circles=3, n_lines=3, line_params=3, test_image = 'mix_A_3_3_rand', axes=axs[0, :])
+    run_experiment(n_circles=7, n_lines=7, line_params=3, test_image = 'mix_B_7_7_rand', axes=axs[1, :])
+    run_experiment(n_circles=16, n_lines=16, line_params=3, downscale=1.0, run_cycles=100, test_image = 'mix_C_16_rand', axes=axs[2, :])
+    save_fig(fig, axs, "Experiment_mixed_summary.png")
+    # Turn off all x axes but bottom row:
     
-    run_experiment(n_circles=3, n_lines=3, line_params=3, test_image = 'mix_A_3_3_rand')
-    run_experiment(n_circles=7, n_lines=7, line_params=3, test_image = 'mix_B_7_7_rand')
-    run_experiment(n_circles=16, n_lines=16, line_params=3, downscale=1.0, run_cycles=100, test_image = 'mix_C_16_rand')
-    run_experiment(n_circles=64, n_lines=64, line_params=3, downscale=1.0, run_cycles=100, test_image = 'mix_D_64_rand')
+    
+def save_fig(fig,axs, filename=None):
+    if filename is None:
+        plt.show()
+        return None
+    
+    for ax in axs[:-1, :].flatten():
+        ax.set_xticklabels([])
+        ax.set_xlabel("")
+    for ax in axs[1:, :].flatten():
+        ax.set_yticklabels([])
+        ax.set_ylabel("")
+
+    # reduce distance between subplots and their titles:
+    # plt.subplots_adjust(hspace=0.2)  
+    
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150)
+    logging.info(f"Saved figure to {filename}")
+    return filename
+    
+    # run_experiment(n_circles=64, n_lines=64, line_params=3, downscale=1.0, run_cycles=100, test_image = 'mix_D_64_rand')
 
 
 if __name__ == "__main__":

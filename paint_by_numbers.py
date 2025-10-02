@@ -22,7 +22,7 @@ import numpy as np
 from synth_image import TestImageMaker
 
 import matplotlib.pyplot as plt
-from util import make_input_grid, pairwise_hamming
+from util import make_input_grid, pairwise_hamming,find_boundary_pixels,pixels_in_bbox
 
 from abc import ABC, abstractmethod
 
@@ -178,11 +178,41 @@ class ColorEncoding(object):
         """
         #
         x, y = make_input_grid((h, w), resolution=1.0, keep_aspect=True)
+        
+        # pre-compute div boundaries:
+        
 
-        regions = [ np.ones((h, w), dtype=bool)]  # Initialize with the full image as one region
+        regions = [ {'mask': np.ones((h, w), dtype=bool),
+                     'bbox': {'x':(0, w), 'y':(0, h)}}]  # Initialize with the full image as one region
+        
+        
+        def cut_region(region, div_mask):
+            """
+            
+            
+            Returns:  side_region1, side_region2, where each is a dict with keys:
+                        'mask': boolean array of shape (h, w) indicating the pixels in that side of the region
+                        'bbox': (x_min, y_min, x_max, y_max) bounding box of the region
+                      or None if the region is not crossed by the divider.
+            """
+            region_wh = region['mask'].shape
+            div_mask_roi = div_mask[region['bbox']['y'][0]:region['bbox']['y'][1],
+                                    region['bbox']['x'][0]:region['bbox']['x'][1]].reshape(region_wh)
+
+            side1_mask = np.logical_and(region['mask'], div_mask_roi)
+            side2_mask = np.logical_and(region['mask'], np.logical_not(div_mask_roi))
+            
+            if np.sum(side1_mask) == 0 or np.sum(side2_mask) == 0:
+                return None, None
+            
+            side_region1 = prune_mask(side1_mask, old_bbox = region['bbox'])
+            
+            side_region2 = prune_mask(side2_mask, old_bbox = region['bbox'])
+            
+            return side_region1, side_region2
 
         
-        def find_regions_crossed(div_mask):
+        def find_regions_crossed(div_mask, div_border):
             """
             Find all regions in 'regions' that are crossed by the given divider mask (i.e. have pixels on both sides of the divider).
             Returns:  List crossed, where crossed[i] is the index of the region that is crossed by the divider, or None if not crossed.
@@ -191,20 +221,32 @@ class ColorEncoding(object):
             """
             crossed = []
             sides = []
-            for r_i, region_mask in enumerate(regions):
-                side1 = np.logical_and(region_mask, div_mask)
-                side2 = np.logical_and(region_mask, np.logical_not(div_mask))
-                if np.any(side1) and np.any(side2):
+            n_skipped = 0
+            
+            for r_i, region in enumerate(regions):
+                if not pixels_in_bbox(region['bbox'], np.array(div_border)):
+                    # if the divider does not intersect the bounding box of the region, skip it
+                    crossed.append(None)
+                    sides.append((None, None))
+                    n_skipped += 1
+                    continue
+                
+                # if there is an intersection, cut the regions (return 2 regions)
+                side_region1, side_region2 = cut_region(region, div_mask)
+                
+                if side_region1 is not None:
                     crossed.append(r_i)
-                    sides.append((side1, side2))
+                    sides.append((side_region1, side_region2))
                 else:
                     crossed.append(None)
                     sides.append((None, None))
+                    
+            logging.info(f"Divider crossed {len(crossed) - n_skipped} regions, skipped {n_skipped} regions that did not intersect the divider bounding box.")
             return crossed, sides
         
-        def split_regions(shape_mask):
+        def split_regions(divider_mask, divider_boundary):
             nonlocal regions
-            crossed_region_inds, sides = find_regions_crossed(shape_mask)
+            crossed_region_inds, sides = find_regions_crossed(divider_mask, divider_boundary)
             new_regions = []
             for r_i, region in enumerate(regions):
                 if crossed_region_inds[r_i] is None:
@@ -214,11 +256,13 @@ class ColorEncoding(object):
                     new_regions.append(sides[r_i][1])
             regions = new_regions
 
-            return len(crossed_region_inds)
+            return np.sum([c is not None for c in crossed_region_inds])
+        
 
         for bit_place, divider in enumerate(self.dividers):
             mask = divider.make_mask((h, w))
-            n_crossed = split_regions(mask)
+            boundary = find_boundary_pixels(mask)
+            n_crossed = split_regions(mask, boundary)
             print(f"Mask {bit_place} crossed {n_crossed} regions, now have {len(regions)} regions")
 
             
@@ -243,7 +287,7 @@ class ColorEncoding(object):
             pruned_mask, offset_yx = pruned_region['mask'], pruned_region['offset']
             n_pixels += np.sum(pruned_mask)
             mask_h, mask_w = pruned_mask.shape
-            target_region = target_image[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w, :]
+            target_region = target_image[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w, :].reshape(mask_h, mask_w)
             region_pixels = target_region[pruned_mask]
 
             
@@ -315,9 +359,14 @@ def test_approx_code_lookup():
     print("Mean matches == code 1: ", np.mean(matches == 1))
     assert np.mean(matches == 1) == 0.5, "Half the queries should match code 1"
 
-def prune_mask(mask):
+def prune_mask(mask, old_bbox=None):
     """
     find the smallest bounding box containing all True values in the mask, 
+    
+    :param mask: boolean array of shape (H, W)
+    :param old_bbox: optional (y0, x0, y1, x1), if given, it's offset will be added to the retuned bbox so they are
+        both with respect to the same origin.
+        
     return dict {'mask': mask[bbox],  # boolean array, the mask without any FALSE rows/cols on the margins
                  'offset': (y0, x0),  # the offset of the returned mask within the original mask
                  }
@@ -328,7 +377,12 @@ def prune_mask(mask):
     y0, y1 = np.min(ys), np.max(ys) + 1
     x0, x1 = np.min(xs), np.max(xs) + 1
     pruned = mask[y0:y1, x0:x1]
-    return {'mask': pruned, 'offset': (y0, x0)}
+    if old_bbox is not None:
+        y0 += old_bbox['y'][0]
+        x0 += old_bbox['x'][0]
+        y1 += old_bbox['y'][0]
+        x1 += old_bbox['x'][0]
+    return {'mask': pruned, 'bbox': {'y':(y0, y1), 'x':(x0, x1)}}
 
 
 def get_aspect_and_lims(shape):

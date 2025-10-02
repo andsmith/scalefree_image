@@ -22,7 +22,7 @@ import numpy as np
 from synth_image import TestImageMaker
 
 import matplotlib.pyplot as plt
-from util import make_input_grid
+from util import make_input_grid, pairwise_hamming
 
 from abc import ABC, abstractmethod
 
@@ -90,13 +90,14 @@ class CircleDivider(Divider):
 
 
 class ColorEncoding(object):
-    _ENCODING_TYPE = np.int64
+    _ENCODING_TYPE = np.uint32
     _ENCODING_BITS = 8 * np.dtype(_ENCODING_TYPE).itemsize  # 64 bits
     
     def __init__(self, dividers):
         self.dividers = dividers  # list of Divider objects
         self._n_codewords = int(np.ceil(len(dividers) / self._ENCODING_BITS))
         self._LUT = None  # Dict mapping self._n_codewords-tuples to 3-vectors of uint8 colors
+        logging.info(f"Initialized ColorEncoding with {len(dividers)} dividers, {self._n_codewords} codewords per code (type {self._ENCODING_TYPE} with {self._ENCODING_BITS} bits each).")
         
     def encode_xy_points(self, x, y):
         """
@@ -128,19 +129,27 @@ class ColorEncoding(object):
         """
         if not hasattr(self, '_codes') or not hasattr(self, '_colors'):
             raise ValueError("ColorEncoding has not been trained yet. Call train_image() first.")
+        data_shape = codes.shape[:-1]
+        n_points = np.prod(data_shape)
+        codes_flat = codes.reshape(-1, self._n_codewords)
+        colors_flat = np.zeros((n_points, 3), dtype=np.uint8)
         
-        n_points = codes.shape[0]
-        colors = np.zeros((n_points, 3), dtype=np.uint8)
-        
-        
+        unmatched = []
         for i in range(n_points):
-            code = tuple(codes[i])
+            code = tuple(codes_flat[i])
             if code in self._LUT:
-                colors[i] = self._LUT[code]
+                colors_flat[i] = self._LUT[code]
                 
             else:
-                colors[i] = np.array([0, 0, 0], dtype=np.uint8)  # default to black if code not found
+                unmatched.append(i)
+        logging.info("Found {}/{} unmatched codes, doing approximate nearest neighbor search.".format(len(unmatched), n_points))
+        
+        closest_matches = approx_code_lookup(self._codes, codes_flat[unmatched], n_bits=len(self.dividers))
+        for idx, match in zip(unmatched, closest_matches):
+            colors_flat[idx] = self._colors[match]
+        colors = colors_flat.reshape(data_shape + (3,))
         return colors
+    
         
     def train_image(self, target_image):
         h, w = target_image.shape[0], target_image.shape[1]
@@ -261,6 +270,50 @@ class ColorEncoding(object):
 def _make_test_image():
     return cv2.imread('input/barn.png')[:,:,::-1]
 
+def approx_code_lookup(codes, queries, n_bits, n_max_queries=1000):
+    """
+    return the code with the highest number of matching bits for each query
+    :param codes:  np.array of shape (n_codes, n_codewords) with the binary codes as unit8 or int32s
+    :param queries: np.array of shape (..., n_codewords) with the binary codes as the same dtype as codes
+    :return: np.array of shape (queries.shape[0],) with the index of the closest code for each query
+    """
+    codeword_dtype = codes.dtype
+    codebits = 8 * np.dtype(codeword_dtype).itemsize
+    n_codes, n_code_words = codes.shape if len(codes.shape) == 2 else (codes.shape[0], 1)
+    #Needs to be done in planes:
+    data_shape = queries.shape[:-1] if n_code_words > 1 else queries.shape
+    
+    unique_queries = np.unique(queries.reshape(-1, n_code_words), axis=0)
+    
+    h_dist_unique = np.zeros((unique_queries.shape[0], n_codes), dtype=int)
+    
+    for w in range(n_code_words):
+       num_bits = codebits if w < n_code_words - 1 else (n_bits - (n_code_words - 1) * codebits)
+       h_dist_unique += pairwise_hamming(unique_queries[...,w],codes[..., w], num_bits)
+    best_unique_code_inds = np.argmin(h_dist_unique, axis=-1)
+    # Now fill them all in 
+    best_code_inds = np.zeros(data_shape, dtype=int)
+    for i, uq in enumerate(unique_queries):
+        matches = np.all(queries == uq, axis=-1)
+        best_code_inds[matches] = best_unique_code_inds[i]
+    return best_code_inds
+    
+    
+    
+
+def test_approx_code_lookup():
+    codes = np.array([0xFF,  # lowest 4 bits on
+                      00, # all bits off
+                      ], dtype=np.uint8)
+    
+    
+    queries = np.arange(32, dtype=np.uint8)
+    matches = approx_code_lookup(codes, queries, n_bits=5)
+    print("Codes:\n", codes)
+    print("Queries:\n", queries)
+    print("Matches:\n", matches)
+    print("Mean matches == code 1: ", np.mean(matches == 1))
+    assert np.mean(matches == 1) == 0.5, "Half the queries should match code 1"
 
 def prune_mask(mask):
     """
@@ -290,7 +343,7 @@ def get_aspect_and_lims(shape):
         
     return aspect, xlim, ylim
 
-def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=9):
+def test_make_LUT(image_size=(32, 24), n_circles=50, n_lines=50):
     dividers = [LineDivider.make_rand() for _ in range(n_lines)] + \
                [CircleDivider.make_rand() for _ in range(n_circles)]
                
@@ -300,19 +353,19 @@ def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=9):
     # image_maker = TestImageMaker(image_size_wh=image_size)   
     # image = image_maker.make_image('c_lines_5_rand')
     image = _make_test_image()
-    image = cv2.resize(image, (image_size[0]//2, image_size[1]//2), interpolation=cv2.INTER_AREA)
+    # image = cv2.resize(image, (image_size[0], image_size[1]), interpolation=cv2.INTER_AREA)
     ce = ColorEncoding(dividers)
-    # import ipdb; ipdb.set_trace()
+    
     
     ce.train_image(image)
     aspect, xlim, ylim = get_aspect_and_lims(image.shape)
     img_extent = (xlim[0], xlim[1], ylim[0], ylim[1])
     x_orig, y_orig = make_input_grid(image.shape[:2], resolution=1.0, keep_aspect=True)
-    shape_big = np.array(image.shape[:2]) * 20
+    shape_big = np.array(image.shape[:2]) * 6
     x, y = make_input_grid(shape_big, resolution=1.0, keep_aspect=True)
     print(f"Encoding {x.size} points")
-    codes = ce.encode_xy_points(x.flatten(), y.flatten())
-    print(f"Getting colors for {codes.shape[0]} codes")
+    codes = ce.encode_xy_points(x, y)
+    print(f"Getting colors for {codes.shape[0]} codes (shape {codes.shape})")
     colors = ce.get_colors(codes)
     print(f"Got {colors.shape[0]} colors")
     colors_img = colors.reshape(shape_big[0], shape_big[1], 3)
@@ -328,6 +381,7 @@ def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=9):
     plt.show()
 
 if __name__ == "__main__":
-
+    logging.basicConfig(level=logging.INFO)
+    # test_approx_code_lookup()
     test_make_LUT()
 

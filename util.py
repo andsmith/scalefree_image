@@ -249,6 +249,44 @@ def test_captioned_frame():
     cv2.destroyAllWindows()
 
 
+def pairwise_hamming(a, b, n_bits=64):
+    """
+    Compute pairwise Hamming distances between two arrays of integers.
+
+    Parameters:
+        a (np.ndarray): shape (N,), array of integers
+        b (np.ndarray): shape (M,), array of integers
+        n_bits (int): Only return this many bits (Least significant bits)
+
+    Returns:
+        np.ndarray: shape (N, M), Hamming distances
+    """
+    # Broadcast XOR between all pairs
+    if n_bits < 64:
+        mask = (1 << n_bits) - 1
+        a = a & mask
+        b = b & mask
+
+    xor_vals = np.bitwise_xor(a[:, None], b[None, :]).astype(np.uint64)
+
+    # View each 64-bit integer as 8 bytes
+    bytes_view = xor_vals.view(np.uint8).reshape(xor_vals.shape + (8,))
+
+    # Unpack each byte into 8 bits → shape (N, M, 8, 8)
+    bits = np.unpackbits(bytes_view, axis=-1)
+
+    # Count 1s across the last two axes → shape (N, M)
+    return bits.sum(axis=(-1))
+
+def test_pairwise_hamming():
+    # Example
+    a = np.array([1, 2, 3], dtype=np.uint64)  # 001, 010, 011
+    b = np.array([0, 7], dtype=np.uint64)     # 000, 111
+    print("a:", a)
+    print("b:", b)
+    dist = pairwise_hamming(a, b)
+    print("Hamming distances:\n", dist)
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     #test_captioned_frame()

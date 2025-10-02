@@ -96,6 +96,7 @@ class ColorEncoding(object):
     def __init__(self, dividers):
         self.dividers = dividers  # list of Divider objects
         self._n_codewords = int(np.ceil(len(dividers) / self._ENCODING_BITS))
+        self._LUT = None  # Dict mapping self._n_codewords-tuples to 3-vectors of uint8 colors
         
     def encode_xy_points(self, x, y):
         """
@@ -134,20 +135,18 @@ class ColorEncoding(object):
         
         for i in range(n_points):
             code = tuple(codes[i])
-            match = np.all(self._codes == codes[i], axis=1)
-            if np.any(match):
-                colors[i] = self._colors[np.argmax(match)]
+            if code in self._LUT:
+                colors[i] = self._LUT[code]
+                
             else:
-                # default to black if code not found
-                colors[i] = np.array([0, 0, 0], dtype=np.uint8)  
-                # TODO:  use closest matching code
-        
+                colors[i] = np.array([0, 0, 0], dtype=np.uint8)  # default to black if code not found
         return colors
         
     def train_image(self, target_image):
         h, w = target_image.shape[0], target_image.shape[1]
         regions = self._find_regions(h, w)
         self._codes, self._colors = self._optimize_colors(target_image, regions)
+        self._LUT = {tuple(self._codes[i]): self._colors[i] for i in range(self._codes.shape[0])}
 
     def _find_regions(self, h, w):
         """

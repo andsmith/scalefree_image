@@ -125,10 +125,21 @@ class TestImageMaker(object):
         return self._mask_to_image_gray(mask)
 
     def _synth_bw_line_static(self):
-        angle = np.pi/2 -np.pi/16# np.random.uniform(0, np.pi/8)
-        center = np.array([0.5, 0.0])
+        angle = np.pi/4 
+        center = np.array([0.0, 0.0])
         mask = self._make_line_mask(angle, center)
         return self._mask_to_image_color(mask)
+    
+    def _synth_bw_lines_test(self):
+        angle1 = np.pi/2 
+        center1 = np.array([0.0, 0.0])
+        angle2 = 0
+        center2 = np.array([0.0, 0.0])
+        mask1 = self._make_line_mask(angle1, center1)
+        mask2 = self._make_line_mask(angle2, center2)
+        combined_mask = mask1*10 + mask2
+        return self._mask_to_image_gray(combined_mask)
+    
     
     # The next three methods have (n) lines at roughly equally spaced angles.
     def _synth_bw_lines_2_rand(self):

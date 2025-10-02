@@ -90,8 +90,12 @@ class CircleDivider(Divider):
 
 
 class ColorEncoding(object):
+    _ENCODING_TYPE = np.int64
+    _ENCODING_BITS = 8 * np.dtype(_ENCODING_TYPE).itemsize  # 64 bits
+    
     def __init__(self, dividers):
         self.dividers = dividers  # list of Divider objects
+        self._n_codewords = int(np.ceil(len(dividers) / self._ENCODING_BITS))
         
     def encode_xy_points(self, x, y):
         """
@@ -104,13 +108,12 @@ class ColorEncoding(object):
         data_shape = x.shape
         n_points = x.shape[0]
         n_dividers = len(self.dividers)
-        n_bytes = (n_dividers + 7) // 8
-        codes = np.zeros(data_shape + (n_bytes,), dtype=np.uint8)
+        codes = np.zeros(data_shape + (self._n_codewords,), dtype=self._ENCODING_TYPE)
         
         for bit_place, divider in enumerate(self.dividers):
             mask = divider.eval(x, y)  # boolean array of shape (n_points,)
-            byte_index = bit_place // 8
-            bit_index = bit_place % 8
+            byte_index = bit_place // self._ENCODING_BITS
+            bit_index = bit_place % self._ENCODING_BITS
             codes[...,mask, byte_index] |= (1 << bit_index)
         
         return codes
@@ -127,6 +130,7 @@ class ColorEncoding(object):
         
         n_points = codes.shape[0]
         colors = np.zeros((n_points, 3), dtype=np.uint8)
+        
         
         for i in range(n_points):
             code = tuple(codes[i])
@@ -220,7 +224,7 @@ class ColorEncoding(object):
         """
         h, w = target_image.shape[0], target_image.shape[1]
         colors = np.zeros((len(regions), 3), dtype=np.uint8)
-        codes = np.zeros((len(regions), (len(self.dividers) + 7) // 8), dtype=np.uint8)
+        codes = np.zeros((len(regions), self._n_codewords), dtype=self._ENCODING_TYPE)
         print(f"\n\n\nOptimizing colors for {len(regions)} regions.")
         
         
@@ -249,8 +253,8 @@ class ColorEncoding(object):
                 div_region = div_mask[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w]
                 side = np.logical_and(pruned_mask, div_region)
                 if np.any(side):
-                    byte_index = bit_place // 8
-                    bit_index = bit_place % 8
+                    byte_index = bit_place // self._ENCODING_BITS
+                    bit_index = bit_place % self._ENCODING_BITS
                     codes[i, byte_index] |= (1 << bit_index)
                     
         return codes, colors
@@ -275,7 +279,19 @@ def prune_mask(mask):
     return {'mask': pruned, 'offset': (y0, x0)}
 
 
-def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=15):
+def get_aspect_and_lims(shape):
+    h, w = shape[0], shape[1]
+    aspect = w / h
+    if aspect >= 1.0:
+        xlim = (-1.0,1.0)
+        ylim = (-1.0/aspect, 1.0/aspect)
+    else:
+        xlim = (-aspect, aspect)
+        ylim = (-1.0, 1.0)
+        
+    return aspect, xlim, ylim
+
+def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=9):
     dividers = [LineDivider.make_rand() for _ in range(n_lines)] + \
                [CircleDivider.make_rand() for _ in range(n_circles)]
                
@@ -290,7 +306,9 @@ def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=15):
     # import ipdb; ipdb.set_trace()
     
     ce.train_image(image)
-    
+    aspect, xlim, ylim = get_aspect_and_lims(image.shape)
+    img_extent = (xlim[0], xlim[1], ylim[0], ylim[1])
+    x_orig, y_orig = make_input_grid(image.shape[:2], resolution=1.0, keep_aspect=True)
     shape_big = np.array(image.shape[:2]) * 20
     x, y = make_input_grid(shape_big, resolution=1.0, keep_aspect=True)
     print(f"Encoding {x.size} points")
@@ -299,13 +317,15 @@ def test_make_LUT(image_size=(32, 24), n_circles=0, n_lines=15):
     colors = ce.get_colors(codes)
     print(f"Got {colors.shape[0]} colors")
     colors_img = colors.reshape(shape_big[0], shape_big[1], 3)
-    fig,ax=plt.subplots(2, 1, figsize=(12, 6))
-    ax[0].imshow(image)
+    fig,ax=plt.subplots(1, 2, figsize=(12, 6))
+    ax[0].imshow(image, extent=img_extent)
+    ax[0].plot(x_orig.flatten(), y_orig.flatten(), 'r.', markersize=1)
     ax[0].set_title("Original Image")
-    ax[0].axis('off')
-    ax[1].imshow(colors_img)
+    ax[0].set_aspect('equal')
+    ax[1].imshow(colors_img, extent=img_extent)
+    ax[1].plot(x_orig.flatten(), y_orig.flatten(), 'r.', markersize=1)
     ax[1].set_title("Encoded Colors")
-    ax[1].axis('off')
+    ax[1].set_aspect('equal')   
     plt.show()
 
 if __name__ == "__main__":

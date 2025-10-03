@@ -17,6 +17,8 @@ class InitRadiiRandom(Initializer):
     def __call__(self, shape, dtype=None, **kwargs):
         spread = [0.3, .7]
         sigmas = np.random.rand(self._num) * (spread[1] - spread[0]) + spread[0]
+        # skew downwards
+        #sigmas = sigmas**3
         log_sigmas = np.log(sigmas)
         return log_sigmas
 

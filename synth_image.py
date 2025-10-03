@@ -1,6 +1,8 @@
+import pdb
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib import colormaps
 import logging
 from util import make_input_grid
 
@@ -11,9 +13,27 @@ class TestImageMaker(object):
     are the methods names without the _synth_ part.
     Methods ending with _rand create different images each call.
     """
-    def __init__(self, image_size_wh=(64, 48)): 
+    def __init__(self, image_size_wh=(64, 48), noise_range_xy = (.75,.5), noise_range_theta=np.pi/4): 
+        """
+        image_size_wh: size of the images to create
+        noise_range_xy: range of random noise for lines and circles.  Their "locations" can be randomly offset by +/- this amount.
+        noise_range_theta: range (+/- this amount) of random noise added to line angles.
+        center_size: size of the center point to add to lines and circles
+        """
         self._wh = image_size_wh
+
+        self._noise_range_xy = noise_range_xy
+        self._noise_range_theta = noise_range_theta
         self._type_list = self._make_type_list()
+        
+    def _noisy_offset(self, xy):
+        n_xy = np.array([xy[0] + np.random.uniform(-self._noise_range_xy[0], self._noise_range_xy[0]),
+                xy[1] + np.random.uniform(-self._noise_range_xy[1], self._noise_range_xy[1])])
+        
+        return n_xy
+               
+    def _noisy_rotate(self, theta):
+        return theta + np.random.uniform(-self._noise_range_theta, self._noise_range_theta)
         
     
     def _add_center_point(self, mask, center, center_size, x_grid, y_grid):
@@ -68,6 +88,19 @@ class TestImageMaker(object):
             mask = self._add_center_point(mask, center, center_size, x_grid, y_grid)
         return mask
     
+    def _paint_by_numbers(self, mask, color_lut):
+        """
+        Paint-by-numbers style conversion of a mask to an image.
+        Count the number of distinct colors, compute n shades of gray.
+        Sweep the mask from top to bottom, left to right, assigning shades
+        in order to assign new numbers to shades.
+        Then fill in the RGB image with the shades
+        """
+        img = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=float)
+        for val, shade in color_lut.items():
+            img[mask == val] = shade
+        return img.astype(np.uint8)
+    
     def _mask_to_image_gray(self, mask):
         """
         Paint-by-numbers style conversion of a mask to an image.
@@ -82,79 +115,173 @@ class TestImageMaker(object):
         intensity = np.linspace(0, 255, n_colors, dtype=np.uint8)
         gray_shades = np.stack((intensity, intensity, intensity), axis=1)
         val_to_shade = {val: gray_shades[i] for i, val in enumerate(unique_vals)}
-        img = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=float)
-        for val, shade in val_to_shade.items():
-            img[mask == val] = shade
-        return img.astype(np.uint8) 
+        img = self._paint_by_numbers(mask, val_to_shade)
+        return img
     
-    def _synth_line_rand(self):
+    def _synth_bw_line_rand(self):
         angle = np.random.uniform(0, 2 * np.pi)
-        center = np.zeros(2)
+        center = self._noisy_offset(np.zeros(2))
         mask = self._make_line_mask(angle, center)
         return self._mask_to_image_gray(mask)
-            
-    def _synth_lines_2_rand(self):
+
+    def _synth_bw_line_static(self):
+        angle = np.pi/2 -np.pi/16# np.random.uniform(0, np.pi/8)
+        center = np.array([0.5, 0.0])
+        mask = self._make_line_mask(angle, center)
+        return self._mask_to_image_color(mask)
+    
+    # The next three methods have (n) lines at roughly equally spaced angles.
+    def _synth_bw_lines_2_rand(self):
         angle1 = np.random.uniform(0, 2 * np.pi)
-        angle2 = angle1 + np.pi/3
-        center = np.zeros(2)
+        angle2 = self._noisy_rotate(angle1 + np.pi/3)
+        center = self._noisy_offset(np.zeros(2))
         mask1 = self._make_line_mask(angle1, center)
         mask2 = self._make_line_mask(angle2, center)
         combined_mask = mask1*10 + mask2
         return self._mask_to_image_gray(combined_mask)
     
-    def _synth_lines_3_rand(self):
+    def _synth_bw_lines_3_rand(self):
         rad = .4
         angle_offset = np.random.uniform(0, 2 * np.pi)
-        centers = np.array([(np.cos(t+angle_offset)*rad, 
-                             np.sin(t+angle_offset)*rad)
+        centers = np.array([self._noisy_offset(np.array((np.cos(t+angle_offset)*rad, 
+                                                np.sin(t+angle_offset)*rad)))
                             for t in (0, 2*np.pi/3, 4*np.pi/3)])
         normals = centers / np.linalg.norm(centers, axis=1, keepdims=True)
         angles = np.arctan2(normals[:,1], normals[:,0]) + np.pi/2
         
         mask1 = self._make_line_mask(angles[0], centers[0])
-        mask2 = self._make_line_mask(angles[1], centers[1])
-        mask3 = self._make_line_mask(angles[2], centers[2])
+        mask2 = self._make_line_mask(self._noisy_rotate(angles[1]), centers[1])
+        mask3 = self._make_line_mask(self._noisy_rotate(angles[2]), centers[2])
         combined_mask = mask1*10+  mask2*100 + mask3
         return self._mask_to_image_gray(combined_mask)
     
-    def _synth_lines_4_rand(self):
+    def _synth_bw_lines_4_rand(self):
         r=.4
         angles = np.radians([0, 90, 180, 270]) + np.pi/2
         angle_offset = np.random.uniform(0, 2 * np.pi)
         angles += angle_offset
-        centers = np.array([(np.cos(t+angle_offset)*r, 
-                             np.sin(t+angle_offset)*r)
-                            for t in (0, np.pi/2, np.pi, 3*np.pi/2)])
-        
-        combined_mask = np.zeros((self._wh[1], self._wh[0]), dtype=int)
+        centers = np.array([self._noisy_offset(np.array((np.cos(t+angle_offset)*r, 
+                             np.sin(t+angle_offset)*r))) for t in (0, np.pi/2, np.pi, 3*np.pi/2)])
+                 
+        combined_mask = np.zeros((self._wh[1], self._wh[0]), dtype=np.int64)
         for i, (angle, center) in enumerate(zip(angles, centers)):
-            mask = self._make_line_mask(angle, center)
-            combined_mask += mask * 10 **i
+            mask = self._make_line_mask(self._noisy_rotate(angle), center).astype(np.int64)
+            combined_mask =  combined_mask + mask * 2 ** i
         return self._mask_to_image_gray(combined_mask)
     
-    def _synth_circle_center(self):
-        center = np.zeros(2)
-        radius = 0.3
-        mask = self._make_circle_mask(center, radius, center_size=0)
-        return self._mask_to_image_gray(mask)
+    def _help_lines_n_rand(self, n=15, margin = 0.02,get_mask=False):
+        """
+        Completely random lines, passing somewhere within the image (- a margin)
+        """
+        
+        def rand_line_mask():
+            angle = np.random.uniform(0, 2 * np.pi)
+            center = self._noisy_offset(np.random.uniform(-1+margin, 1-margin, size=2))
+            return self._make_line_mask(angle, center)
+        combined_mask = np.zeros((self._wh[1], self._wh[0]), dtype=np.float64)
+        mantissa = 2. if n < 20 else 1.5
+        for i in range(n):
+            mask = rand_line_mask().astype(np.float64)
+            combined_mask += mask * mantissa ** i
+        if get_mask:
+            return combined_mask
+        return self._mask_to_image_color(combined_mask)
     
+    def _synth_c_lines_5_rand(self):
+        return self._help_lines_n_rand(n=5)
+    
+    def _synth_c_lines_15_rand(self):
+        return self._help_lines_n_rand(n=15)
+    
+    def x_synth_c_lines_100_rand(self):
+        return self._help_lines_n_rand(n=100)
+
+
+    
+    def _mask_to_image_color(self, mask, cmap_name='nipy_spectral'):
+        color_inds = np.unique(mask)
+        n_colors = len(color_inds)
+        colors = colormaps.get_cmap(cmap_name)
+        color_t = np.linspace(0, 1, n_colors)
+        color_shades = (colors(color_t)[:,:3] * 255).astype(np.uint8)
+        val_to_shade = {val: color_shades[i] for i, val in enumerate(color_inds)}
+        img = self._paint_by_numbers(mask, val_to_shade)
+        return img
+    
+    def _synth_bw_circle_rand(self):
+        return self._help_synth_circles_rand(n=1)
+    
+    # The next three methods have (n) circles at roughly equally spaced angles & distances.
     def _help_synth_circles_rand(self, n=5):
         angle_offset = np.random.uniform(0, 2 * np.pi)
         angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + angle_offset
+        angles = [self._noisy_rotate(t) for t in angles]
         separation = 0.25
         radii = 0.5
-        centers = np.array([(np.cos(t+angle_offset) * separation,
-                             np.sin(t+angle_offset) * separation) for t in angles])
-        masks = [self._make_circle_mask(center, radii, center_size=0)*10**i for i, center in enumerate(centers)]
-        return self._mask_to_image_gray(np.sum(masks, axis=0))
+        centers = np.array([self._noisy_offset(np.array((np.cos(t+angle_offset) * separation,
+                                               np.sin(t+angle_offset) * separation))) for t in angles])
+        mantissa = 2. if n < 20 else 1.5
+        masks = [self._make_circle_mask(center, radii, center_size=0).astype(np.float64)*mantissa**i 
+                 for i, center in enumerate(centers)]
+        mask = np.sum(masks, axis=0)
+        return self._mask_to_image_gray(mask)
     
-    def _synth_circles_2_rand(self):
+    def _synth_bw_circles_2_rand(self):
         return self._help_synth_circles_rand(n=2)
-    def _synth_circles_3_rand(self):
+    def _synth_bw_circles_3_rand(self):
         return self._help_synth_circles_rand(n=3)
-    def _synth_circles_4_rand(self):
+    def _synth_bw_circles_4_rand(self):
         return self._help_synth_circles_rand(n=4)
 
+    def _help_circles_n_rand(self, n=3, get_mask=False):
+        """
+        Completely random circles, centered somewhere within the image.
+        radius is random, but constrained to keep the circle within the image.
+        """
+        
+        def rand_circle_mask():
+            center = self._noisy_offset(np.random.uniform(-0.8, 0.8, size=2))
+            radius = np.random.uniform(0.1, 2.0)
+            return self._make_circle_mask(center, radius, center_size=0)
+        
+        combined_mask = np.zeros((self._wh[1], self._wh[0]), dtype=np.float64)
+        mantissa = 2. if n < 20 else 1.5
+
+        for i in range(n):
+            mask = rand_circle_mask().astype(np.float64)
+            combined_mask += mask * mantissa ** i
+            
+        if get_mask:
+            return combined_mask
+        
+        return self._mask_to_image_color(combined_mask)
+    
+    
+    def _synth_c_circles_15_rand(self):
+        return self._help_circles_n_rand(n=15)
+    
+    def x_synth_c_circles_100_rand(self):
+        return self._help_circles_n_rand(n=100)  
+    
+    def _synth_c_circles_5_rand(self):
+        return self._help_circles_n_rand(n=5)
+    
+    
+    def _help_mix_n_rand(self,n_each, cmap_name='flag'):
+        mask1 = self._help_lines_n_rand(n=n_each,get_mask=True)
+        mask2 = self._help_circles_n_rand(n=n_each, get_mask=True)
+        combined_mask = mask2.astype(np.float64) + np.pi * mask1.astype(np.float64)
+        return  self._mask_to_image_color(combined_mask,cmap_name=cmap_name)
+
+    def _synth_mix_A_3_3_rand(self):
+        return self._help_mix_n_rand(n_each=4)
+    def _synth_mix_B_7_7_rand(self):
+        return self._help_mix_n_rand(n_each=8)
+    def _synth_mix_C_16_rand(self):
+        return self._help_mix_n_rand(n_each=16,)
+    def _synth_mix_D_64_rand(self):
+        return self._help_mix_n_rand(n_each=64, cmap_name='flag')
+    
     def _func_prefix(self, func_name):
         func = getattr(self, func_name)
         return func.__name__[7:]  # strip off _synth_
@@ -169,6 +296,7 @@ class TestImageMaker(object):
         """
         Create an image of the specified type.
         """
+        logging.info(f"Making image of type: {name}, shape: {self._wh}")
         if name not in self._type_list:
             raise ValueError(f"Invalid type name: {name}, must be one of {self._type_list}")
         func = getattr(self, f"_synth_{name}")
@@ -176,13 +304,22 @@ class TestImageMaker(object):
     
     def get_types(self):
         return self._type_list
+    
+def test_single9(name='mix_64_rand'):
+    maker = TestImageMaker((640*2,480*2))
+    img = maker.make_image(name)
+    plt.figure(figsize=(6,6))
+    plt.imshow(img)
+    plt.title(name, fontsize=16)
+    plt.axis('off')
+    plt.show()
 
 def test_images():
     maker = TestImageMaker((640,480))
     test_types = maker.get_types()
     logging.info("Available test image types: %s" % (test_types,))
     n_types = len(test_types)
-    n_cols = int(np.min((np.ceil(np.sqrt(n_types) *1.2), n_types)))
+    n_cols = int(np.min((np.ceil(np.sqrt(n_types) *1.0), n_types)))
     n_rows = int(np.ceil(n_types / n_cols))
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols*3, n_rows*3))
@@ -205,3 +342,4 @@ def test_images():
 if __name__=="__main__":
     logging.basicConfig(level=logging.INFO)
     test_images()
+    # test_single9()

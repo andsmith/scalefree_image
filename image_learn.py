@@ -30,7 +30,7 @@ import matplotlib.gridspec as gridspec
 from synth_image import TestImageMaker
 from copy import deepcopy
 
-
+from loop_timing.loop_profiler import LoopPerfTimer as LPT
 DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'sigmoid': NormalLayer}
 
 
@@ -56,7 +56,7 @@ class ScaleInvariantImage(object):
         :param grad_sharpness: sharpness constant for gradient of activation function, e.g. f'(x) = sharpness * sech^2(x*sharpness)
         :param learning_rate_initial: initial learning rate for Adadelta optimizer
         :param downscale: downscale factor for training image (1.0 = full size, 0.5 = half size, etc)
-        :param center_weight_params: if not None, a dict with keys 'weight' (float) and 'sigma' (float) to weight center pixels more heavily
+        :param center_weight_params: if not None, a dict with keys: 'r_inner' (float), 'r_outer' (float), 'w_max' (float), and 'xy_offset' (tuple of floats)
 
         """
         self.image_raw = image_raw
@@ -80,7 +80,8 @@ class ScaleInvariantImage(object):
                              'center_points': [],
                              'lines': []},
                          'sigmoid': { 
-                             'bands': []}}
+                             'bands': []},
+                         'output_image': None}
 
         self._lims_set = False
 
@@ -140,13 +141,9 @@ class ScaleInvariantImage(object):
         
         if self._center_weight_params is not None:
             train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
-            self._weight_grid = make_central_weights(train_img_size_wh, 
-                                                     max_weight=self._center_weight_params['weight'],
-                                                     rad_rel=self._center_weight_params['sigma'], 
-                                                     flatness=self._center_weight_params['flatness'],
-                                                     offsets_rel=self._center_weight_params['xy_offsets_rel'])
+            self._weight_grid = make_central_weights(train_img_size_wh, **self._center_weight_params)
             logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
-                         (self._center_weight_params['weight'], self._center_weight_params['sigma'], train_img_size_wh))
+                         (self._center_weight_params['w_max'], self._center_weight_params['r_inner'], train_img_size_wh))
             self._sample_weights = self._weight_grid.reshape(-1)
             self.weight_cross_sections = {'x': self._weight_grid[self._weight_grid.shape[0]//2,:],
                                           'y': self._weight_grid[:,self._weight_grid.shape[1]//2]}
@@ -174,10 +171,11 @@ class ScaleInvariantImage(object):
             elif layer.__class__.__name__ == 'LineLayer':
                 weights = layer.get_weights()
                 # three param:
-                #params['linear'] = {'centers': weights[0], 'angles': weights[1]}
-                
+                if self._line_params == 3:
+                    params['linear'] = {'centers': weights[0], 'angles': weights[1], 'offsets': weights[2]}
                 # two param"
-                params['linear'] = {'offsets': weights[0], 'angles': weights[1]}
+                elif self._line_params == 2:
+                    params['linear'] = {'offsets': weights[0], 'angles': weights[1]}
             elif layer.__class__.__name__ == 'NormalLayer':
                 weights = layer.get_weights()
                 params['sigmoid'] = {'weights': weights[0], 'biases': weights[1]}
@@ -208,10 +206,30 @@ class ScaleInvariantImage(object):
         # now scale to pixel coords
         px = (x + 1.0) * 0.5 * (img_shape[1]-1)
         py = (y + 1.0) * 0.5 * (img_shape[0]-1)
-        return np.hstack((px.reshape(-1, 1), py.reshape(-1, 1)))
+        return np.hstack((px.reshape(-1, 1), py.reshape(-1, 1))).astype(int)
+    
+    def radius_to_pixel_radius(self, radius, img_shape, orig_aspect=True):
+        """
+        Convert a radius in unit coordinates to pixel radius
+        :param img_shape: (h,w,c) shape of the image
+        :param orig_aspect: assume coords are bounded on the narrower dimension
+           to use the training image's aspect ratio, otherwise assume square
+        """
+        w, h = self.image_train.shape[1], self.image_train.shape[0]
+
+        if orig_aspect:
+            # unscale to unit square
+            aspect_ratio = w / h
+            if aspect_ratio > 1:
+                r_px = radius * aspect_ratio * 0.5 * (img_shape[0]-1)
+            else:
+                r_px = radius / aspect_ratio * 0.5 * (img_shape[1]-1)
+        else:
+            r_px = radius * 0.5 * min(img_shape[0]-1, img_shape[1]-1)
+        return r_px.astype(int)
 
 
-    def draw_div_units(self, ax, output_image=None, margin=0.1, norm_colors=True):
+    def draw_div_units(self, ax, output_image=None, margin=0.1, plot_units=False, draw_flags=None):
         """
         # Draw a representation of the division units on the given axis.
         For line units: 
@@ -225,7 +243,6 @@ class ScaleInvariantImage(object):
         :param margin: The x and y limits will be [-1, +1] on the larger dimension,
             (-a-margin, a+margin)) on the smaller, where a is min(aspect, 1/aspect)
         """
-        img_ax= ax 
         
         aspect_ratio = self.image_train.shape[1] / self.image_train.shape[0]
         if aspect_ratio > 1:
@@ -235,19 +252,56 @@ class ScaleInvariantImage(object):
              x_lim = (-aspect_ratio, aspect_ratio)
              y_lim = (-1.0/aspect_ratio-margin, 1.0/aspect_ratio+margin)
              
-        # normalize so each channel spans full range:
-        if norm_colors and output_image is not None:
-            for c in range(3):
-                c_min, c_max = output_image[:, :, c].min(), output_image[:, :, c].max()
-                if c_max > c_min:
-                    output_image[:, :, c] = (output_image[:, :, c] - c_min) / (c_max - c_min)
-                        
-            image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
-            image = output_image if output_image is not None else self.image_train
-            img_ax.imshow(image, extent=image_extent)
+        # Base image for plotting (reuse artist to avoid accumulation)
+        if output_image is not None:
+            # if norm_colors:
+            #     img_to_show = output_image.copy()
+            #     for c in range(3):
+            #         c_min, c_max = img_to_show[:, :, c].min(), img_to_show[:, :, c].max()
+            #         if c_max > c_min:
+            #             img_to_show[:, :, c] = (img_to_show[:, :, c] - c_min) / (c_max - c_min)
+            # else:
+            #     img_to_show = output_image
+            img_to_show = output_image
+        else:
+            img_to_show = self.image_train
+
+        image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
+        if self._artists['output_image'] is None:
+            self._artists['output_image'] = ax.imshow(img_to_show, extent=image_extent)
+        else:
+            self._artists['output_image'].set_data(img_to_show)
+            self._artists['output_image'].set_extent(image_extent)
         #ax.invert_yaxis()
+        alpha=1.0
+        line_width = 2.0
+        
 
         params = self.get_div_params()
+        if not plot_units:
+            for line in self._artists['linear']['lines']:
+                line.set_visible(False)
+            for center in self._artists['linear']['center_points']:
+                center.set_visible(False)
+            for band in self._artists['sigmoid']['bands']:
+                band.set_visible(False)
+            for center in self._artists['circular']['center_points']:
+                center.set_visible(False)
+            for curve in self._artists['circular']['curves']:
+                curve.set_visible(False)
+            return
+        else:
+            # make everything visible
+            for line in self._artists['linear']['lines']:
+                line.set_visible(True)
+            for center in self._artists['linear']['center_points']:
+                center.set_visible(True)
+            for band in self._artists['sigmoid']['bands']:
+                band.set_visible(True)
+            for center in self._artists['circular']['center_points']:
+                center.set_visible(True)
+            for curve in self._artists['circular']['curves']:
+                curve.set_visible(True)
         
         if 'linear' in params:
             if 'centers' in params['linear']:
@@ -255,52 +309,53 @@ class ScaleInvariantImage(object):
                 # FLIP Y for display
                 #centers = centers[:,::-1]
                 centers[:,1] = -centers[:,1]
-                #angles = params['linear']['angles']
+                angles = params['linear']['angles']
                 # rotate for display
                 #angles = np.pi/2.0 - angles  
                 if len(self._artists['linear']['center_points']) == 0:
                     self._artists['linear']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
-                                                                        'o', color='red', markersize=4, alpha=0.5)[0])
+                                                                        'o', color='red', markersize=4, alpha=alpha)[0])
                 else:
                     self._artists['linear']['center_points'][0].set_data(centers[:,0], centers[:,1])
 
-                # for i in range(self.n_div['linear']):
-                #     c = centers[i]
-                #     a = angles[i]
-                #     line_len = 3.0
-                #     dx = np.cos(a) * line_len
-                #     dy = np.sin(a) * line_len
-                #     if len(self._artists['linear']['lines']) <= i:
-                #         line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='red', alpha=0.5)
-                #         self._artists['linear']['lines'].append(line)
-                #     else:
-                #         self._artists['linear']['lines'][i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy])
+                for i in range(self.n_div['linear']):
+                    c = centers[i]
+                    t = [-3.0, 3.0]
+                    dx = np.cos(angles[i])
+                    dy = np.sin(angles[i])
+                    p0 = c + t[0] * np.array([dy, dx])
+                    p1 = c + t[1] * np.array([dy, dx])
+                    if len(self._artists['linear']['lines']) <= i:
+                        line, = ax.plot([p0[0], p1[0]], [p0[1], p1[1]], '-', color='red', alpha=0.5)
+                        self._artists['linear']['lines'].append(line)
+                    else:
+                        self._artists['linear']['lines'][i].set_data([p0[0], p1[0]], [p0[1], p1[1]])
 
             elif 'offsets' in params['linear']:
                 # 2 parameterization of the line (angle, offset from origin)
                 offsets = params['linear']['offsets']
-                angles = params['linear']['angles']
-                normals = np.vstack((np.cos(angles), np.sin(angles))).T
+                angles = params['linear']['angles']  
+                normals = np.vstack((np.cos(angles), 
+                                     -np.sin(angles))).T
                 for l_i in range(self.n_div['linear']):
                     n = normals[l_i]
                     d = offsets[l_i]
                     # point on line closest to origin:
                     c = n * d
-                    line_len = 3.0
-                    dx = np.cos(angles[l_i]) * line_len
-                    dy = np.sin(angles[l_i]) * line_len
-                    if len(self._artists['linear']['center_points']) <= l_i:
-                        self._artists['linear']['center_points'].append( ax.plot(c[0], c[1], 
-                                                                            'o', color='blue', markersize=4, alpha=0.5)[0])
-                    else:
-                        self._artists['linear']['center_points'][l_i].set_data(c[0], c[1])
-
+                    t = [-4.0, 4.0]
+                    dx = np.cos(angles[l_i])
+                    dy = np.sin(angles[l_i])
+                    p0= c + t[0] * np.array([dy, dx])
+                    p1= c + t[1] * np.array([dy, dx])
+                    
+                    points = np.array((p0, p1))
+                    
+                    
                     if len(self._artists['linear']['lines']) <= l_i:
-                        line, = ax.plot([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy], '-', color='blue', alpha=0.5)
+                        line, = ax.plot(points[:,0], points[:,1], '-', color='red', alpha=alpha, linewidth=line_width)
                         self._artists['linear']['lines'].append(line)
                     else:
-                        self._artists['linear']['lines'][l_i].set_data([c[0]-dx, c[0]+dx], [c[1]-dy, c[1]+dy]
-                                                                      )
+                        self._artists['linear']['lines'][l_i].set_data(points[:,0], points[:,1])
         if 'circular' in params:
             
             centers = params['circular']['centers']# switch to (x,y)
@@ -309,7 +364,7 @@ class ScaleInvariantImage(object):
 
             if len(self._artists['circular']['center_points']) == 0:
                 self._artists['circular']['center_points'].append( ax.plot(centers[:,0], centers[:,1], 
-                                                                    'o', color='blue', markersize=4, alpha=0.5)[0])
+                                                                    'o', color='red', markersize=4, alpha=alpha)[0])
             else:
                 self._artists['circular']['center_points'][0].set_data(centers[:,0], centers[:,1])
             
@@ -317,7 +372,7 @@ class ScaleInvariantImage(object):
                 c = centers[i]
                 r = radii[i]
                 if len(self._artists['circular']['curves']) <= i:
-                    circle_inner = plt.Circle((c[0], c[1]), r, color='red', fill=False)
+                    circle_inner = plt.Circle((c[0], c[1]), r, color='blue', fill=False, alpha=alpha, linewidth=line_width)
                     ax.add_artist(circle_inner)
                     self._artists['circular']['curves'].append(circle_inner)
                 else:
@@ -347,11 +402,7 @@ class ScaleInvariantImage(object):
         if True:#not self._lims_set:
             ax.set_xlim(np.array(x_lim))
             ax.set_ylim(np.array(y_lim))
-        img_ax.set_aspect('equal')
-        ax.set_aspect('equal')
         
-
-        plt.show()
 
     def _init_model(self):
         """
@@ -398,7 +449,7 @@ class ScaleInvariantImage(object):
         return model
 
     def get_loss(self):
-        loss = self._model.evaluate(self._input, self._output, batch_size=self.batch_size, verbose=0)
+        loss = self._model.evaluate(self._input, self._output, batch_size=8192, verbose=0)
         logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
         return loss
 
@@ -427,13 +478,14 @@ class ScaleInvariantImage(object):
         self._model.fit(input, output, epochs=epochs, sample_weight=sample_weights,
                         batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
         # Get loss for each step
-        batch_history = batch_losses.batch_losses
-        logging.info("Batch losses for cycle %i: %s steps" % (self.cycle, len(batch_history)))
-        self.cycle += 1
-        loss = self.get_loss()
-        return batch_history, loss
+        loss_history = batch_losses.losses
 
-    def gen_image(self, output_shape, border=0.0, keep_aspect=True):
+        logging.info("Batch losses for cycle %i has %i epochs, each with %i minibatches" % (self.cycle, len(loss_history), len(loss_history[0])))
+        self.cycle += 1
+        
+        return loss_history
+
+    def gen_image(self, output_shape, border=0.0, keep_aspect=True, div_color_f=None, div_thickness=None):
 
         x, y = make_input_grid(output_shape, resolution=1.0, border=border, keep_aspect=keep_aspect)
         shape = x.shape
@@ -444,13 +496,93 @@ class ScaleInvariantImage(object):
                                                                                                    np.min(inputs[:, 1]),
                                                                                                    np.max(inputs[:, 1]),
                                                                                                    inputs.shape[0]))
-        rgb = self._model.predict(inputs)
+        rgb = self._model.predict(inputs, batch_size=65536, verbose=True)
         logging.info("Display spans:  [%.3f, %.3f]" % (np.min(rgb), np.max(rgb)))
         img = cv2.merge((rgb[:, 0].reshape(shape[:2]), rgb[:, 1].reshape(shape[:2]), rgb[:, 2].reshape(shape[:2])))
         n_clipped = np.sum(img < 0) + np.sum(img > 1)
         logging.info("Display clipping:  %i (%.3f %%)" % (n_clipped, float(n_clipped)/img.size * 100.0))
         img[img < 0.] = 0.
         img[img > 1.] = 1.
+
+        if div_color_f is not None:
+            ### render all divider units to the image
+            
+            # Draw white lines on this black image, then overlay on the output image
+            border_alpha_mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
+            params = self.get_div_params()
+            
+            
+            if 'linear' in params:
+                if 'centers' in params['linear']:
+                    centers = params['linear']['centers'].reshape(-1,2)  # switch to (x,y)
+                    centers[:,1] = -centers[:,1]
+                    angles = params['linear']['angles']
+
+                    for i in range(self.n_div['linear']):
+                        c = centers[i]
+                        t = [-4.0, 4.0]
+                        dx = np.cos(angles[i])
+                        dy = np.sin(angles[i])
+                        p0 = c + t[0] * np.array([dy, dx])
+                        p1 = c + t[1] * np.array([dy, dx])
+                        p0_px = self.unit_coords_to_pixels(p0.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                        p1_px = self.unit_coords_to_pixels(p1.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                        cv2.line(border_alpha_mask, (p0_px[0], p0_px[1]), (p1_px[0], p1_px[1]),
+                                 color=255, thickness=div_thickness if div_thickness is not None else 1, lineType=cv2.LINE_AA)
+                        
+                    
+
+                elif 'offsets' in params['linear']:
+                    pass
+                    # # 2 parameterization of the line (angle, offset from origin)
+                    # self._artists['linear']['center_points']= None  # Unused for 2-parameter lines
+                    offsets = params['linear']['offsets']
+                    angles = params['linear']['angles'] 
+                    normals = np.vstack((np.cos(angles), -np.sin(angles))).T
+                    for l_i in range(self.n_div['linear']):
+                        n = normals[l_i]
+                        d = offsets[l_i]
+                        # point on line closest to origin:
+                        c = n * d
+                        t = [-4.0, 4.0]
+                        dx = np.cos(angles[l_i])
+                        dy = np.sin(angles[l_i])
+                        p0= c + t[0] * np.array([dy, dx])
+                        p1= c + t[1] * np.array([dy, dx])
+                        
+                        p0_px = self.unit_coords_to_pixels(p0.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                        p1_px = self.unit_coords_to_pixels(p1.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                        points = np.array((p0_px, p1_px))
+
+                        cv2.line(border_alpha_mask, points[0], points[1], color=255,
+                                 thickness=div_thickness if div_thickness is not None else 1, lineType=cv2.LINE_AA)
+                        
+                    
+            if 'circular' in params:
+                centers = params['circular']['centers']# switch to (x,y)
+                centers[:,1] = -centers[:,1]
+                radii = params['circular']['radii']
+
+                for i in range(centers.shape[0]):
+                    c = centers[i]
+                    r = radii[i]
+                    centers_px = self.unit_coords_to_pixels(c.reshape(1,2), img.shape, orig_aspect=keep_aspect)[0]
+                    r_px = self.radius_to_pixel_radius(r, img.shape, orig_aspect=keep_aspect)
+                    cv2.circle(border_alpha_mask, (centers_px[0], centers_px[1]), r_px,
+                               color=255, thickness=div_thickness if div_thickness is not None else 1, lineType=cv2.LINE_AA)
+                    
+            if 'sigmoid' in params:
+                raise NotImplementedError("Rendering sigmoid units not implemented yet.")
+            border_alpha_mask = border_alpha_mask[::-1]
+            # Apply border mask, merge the color to the image where the mask is set, etc.
+            float_mask = border_alpha_mask.astype(img.dtype) / 255.0
+           
+            float_mask = np.repeat(float_mask[:, :, np.newaxis], 3, axis=2)
+            border_rgb = np.ones_like(img, dtype=np.float32) * np.array(div_color_f).reshape(1,1,3)
+            imgb = img.copy()
+            imgb = imgb * (1.0 - float_mask) + border_rgb * float_mask
+            img = imgb
+
         return img
 
     def save_state(self, model_filename):
@@ -469,6 +601,7 @@ class ScaleInvariantImage(object):
                 'sharpness': self.sharpness,
                 'grad_sharpness': self.grad_sharpness
                 }
+        
         with open(model_filename, 'wb') as outfile:
             cp.dump(data, outfile, protocol=cp.HIGHEST_PROTOCOL)
 
@@ -496,13 +629,14 @@ class BatchLossCallback(Callback):
 
     def __init__(self):
         super().__init__()
-        self.batch_losses = []
+        self.losses = []  # list for each epoch of all minibatch losses
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        self.losses.append([])  # new epoch    
 
     def on_train_batch_end(self, batch, logs=None):
-        self.batch_losses.append(logs['loss'])
-        # Optional: print the loss for each batch
-        # print(f"Batch {batch+1} loss: {logs['loss']:.4f}")
-
+        self.losses[-1].append(logs['loss'])
+        
 
 class UIDisplay(object):
 
@@ -520,7 +654,7 @@ class UIDisplay(object):
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, 
-                 synth_image_name = None,verbose=True, **kwargs):
+                 synth_image_name = None,verbose=True, div_render_params=None, **kwargs):
         self._verbose = verbose
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
@@ -541,12 +675,16 @@ class UIDisplay(object):
         self._learning_rate_init = learning_rate
         self._learning_rate_final = learning_rate_final
         self._output_image = None
-        self._loss_history = []
+        self._loss_history = [] # list {'cycle': cycle_index,'epochs': [list of minibatch losses for each epoch]}
         self._l_rate_history = []
         self._batch_size = batch_size
         self._nogui = nogui
         self._metadata = []
         self.final_loss = None
+        self._show_dividers = True
+        self._ui_flags = {n:False for n in range(10)}  # for keypress toggles
+        self.div_render_params = div_render_params if div_render_params is not None else {}
+        
         if learning_rate_final is not None:
             if learning_rate_final < 0:
                 raise Exception("Final learning rate must be non-negative for annealing.")
@@ -595,7 +733,7 @@ class UIDisplay(object):
 
         self._just_image = just_image
         
-    def _set_image(self, img_filename, synth_name, image_size_wh = (64, 48)):
+    def _set_image(self, img_filename, synth_name, image_size_wh = (2*64, 2*(32+16))):
         """
         disambiguate, load  / generate image
         :param img_filename: path to image file
@@ -604,7 +742,6 @@ class UIDisplay(object):
         """
         if synth_name is not None:
             image_maker = TestImageMaker(image_size_wh)
-            print("Making:", synth_name)
             image_raw = image_maker.make_image(synth_name)
             file_prefix = "SYNTH_%s" % (synth_name,)
             logging.info("Generated synthetic image type %s with shape %s, using prefix %s" %
@@ -691,41 +828,43 @@ class UIDisplay(object):
 
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
-            loss = self._sim.get_loss()
+            cur_loss = self._sim.get_loss()
             frame_name = self._write_frame(self._output_image)  # Create & save image
             init_meta = {'cycle': self._sim.cycle,
                          'learning_rate': self._learn_rate,
-                         'loss': loss,
+                         'current_loss': cur_loss,
                          'filename': frame_name}
             self._metadata.append(init_meta)
             self._write_metadata()
 
-        loss = None
+        cur_loss = None
         while (max_iter==0 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
             logging.info("Training batch_size: %i, cycle: %i of %i, learning_rate: %.6f" %
                          (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
 
-            new_losses, loss = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
-            
+            new_losses = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
+            cur_loss = self._sim.get_loss()
             self._l_rate_history.append(self._learn_rate)
-            self._loss_history.append(new_losses)
+            self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
+            self._cycle = self._sim.cycle  # update AFTER saving data, since train_more increments it at the end
 
-            # self._save_state()
-            if self._shutdown:
-                break
+
+
 
             self._output_image = self._gen_image()
             frame_name = self._write_frame(self._output_image)  # Create & save image
-            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'loss': loss, 'filename': frame_name})
+            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
             out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
             self._sim.save_state(out_path)  # TODO:  Move after each cycle
             logging.info("Saved model state to:  %s" % (out_path,))
-
-            self._cycle += 1
+            
+            if self._shutdown:
+                break
+            
             run_cycle += 1
             
 
@@ -743,13 +882,15 @@ class UIDisplay(object):
             logging.info("To make a movie from the images, try:")
             logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
                          (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
-        self.final_loss = loss
+        self.final_loss = cur_loss
+        logging.info("Final loss after %i cycles:  %.6f" % (run_cycle, cur_loss))
+        return cur_loss
     
     def _gen_image(self, shape=None):
         if shape is None:
             train_shape = self._sim.image_train.shape
             shape = (np.array(train_shape[:2]) * self._display_multiplier).astype(int)
-        img = self._sim.gen_image(output_shape=shape, border=self._border)
+        img = self._sim.gen_image(output_shape=shape, border=self._border, **self.div_render_params)
         return img
 
     def _write_image(self, img, filename=None):
@@ -759,6 +900,7 @@ class UIDisplay(object):
 
     def _write_frame(self, img):
         out_path = None
+        
         if self._frame_dir is not None:
             if not os.path.exists(self._frame_dir):
                 os.makedirs(self._frame_dir)
@@ -798,6 +940,11 @@ class UIDisplay(object):
         if event.key == 'x' or event.key == 'escape' or event.key == 'q':
             logging.info("Shutdown requested, waiting for worker to finish...")
             self._shutdown = True
+        elif event.key =='d':
+            # toggle annotation of divider units
+            self._show_dividers = not self._show_dividers
+            logging.info("Toggled divider unit annotation:  %s" % ("on" if self._show_dividers else "off",))
+            self._update_plots = True
         elif event.key == 'a':
             self._show_all_hist = not self._show_all_hist
             logging.info("Toggled loss history display mode:  %s" % ("all cycles" if self._show_all_hist else "last 5 cycles only",))   
@@ -805,6 +952,11 @@ class UIDisplay(object):
         elif event.key == 'w':
             self._show_weight_contours = not self._show_weight_contours
             logging.info("Toggled weight contour display:  %s" % ("on" if self._show_weight_contours else "off",))   
+            self._update_plots = True
+        elif event.key in [str(n) for n in range(10)]:
+            n = int(event.key)
+            self._ui_flags[n] = not self._ui_flags[n]
+            logging.info("Toggled UI flag %i to:  %s" % (n, "on" if self._ui_flags[n] else "off"))
             self._update_plots = True
         else:
             logging.info("Unassigned key: %s" % (event.key,))
@@ -830,7 +982,7 @@ class UIDisplay(object):
             loss = self._train_thread(max_iter = debug_epochs_nothread)
             self._output_image = self._gen_image()
             fig, ax = plt.subplots(1,1)
-            self._sim.draw_div_units(ax=ax, output_image=self._output_image)
+            self._sim.draw_div_units(ax=ax, output_image=self._output_image, plot_units=True, draw_flags=self._ui_flags)
             plt.show()
             self._worker = None
         else:
@@ -863,11 +1015,11 @@ class UIDisplay(object):
             #   |      | |      | |p2|
             #   |      | |      | |  |
             #   +------+ +------+ +--+
-            
-            grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,.7])
+
+            grid = gridspec.GridSpec(8, 3, width_ratios=[1,1,1])
             logging.info("Tall images, orienting side-by-side.")
             train_ax = fig.add_subplot(grid[:, 0])
-            out_ax = fig.add_subplot(grid[:, 1])
+            out_unit_ax= fig.add_subplot(grid[:, 1])
         else:
             # wide images, stacked vertically, plots on the right
             #
@@ -880,24 +1032,16 @@ class UIDisplay(object):
             #   | Output      | |  |
             #   +-------------+ +--+
             logging.info("--------------------------Wide images, orienting vertically.")
-            grid = gridspec.GridSpec(8, 2, width_ratios=[2,.7])
+            grid = gridspec.GridSpec(8, 2, width_ratios=[2,1])
             train_ax = fig.add_subplot(grid[:4, 0])
-            out_ax = fig.add_subplot(grid[4:, 0])
+            out_unit_ax = fig.add_subplot(grid[4:, 0])
         
         #if self._center_weight_params is not None:            
         lrate_ax = fig.add_subplot(grid[:2, -1])
         loss_ax = fig.add_subplot(grid[2:5, -1],sharex=lrate_ax)
-        weight_ax = fig.add_subplot(grid[5:, -1])
+        out_ax = fig.add_subplot(grid[5:, -1])
         weights_plotted=False
-        # else:
-        #     lrate_ax = fig.add_subplot(grid[:3, -1])
-        #     loss_ax = fig.add_subplot(grid[3:, -1],sharex=lrate_ax)
-        #     weight_ax = None
-        #     weights_plotted=True
-            
-                
-
-
+        
         lrate_ax.grid(which='major', axis='both')
         loss_ax.grid(which='both', axis='both')
         lrate_ax.tick_params(labeltop=False, labelbottom=False)# turn off x tick labels for lrate
@@ -906,10 +1050,10 @@ class UIDisplay(object):
         loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
         loss_ax.set_ylabel("Loss")
         cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
-        loss_ax.set_title("Training Loss History\n%s\n1 dot = 1 minibatch (%i samples)" % (  cmd, self._batch_size))
+        loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
 
-        lrate_ax.set_ylabel("Learning Rate")
-        lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
+        lrate_ax.set_ylabel("")  # Learning Rate")
+        lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,), fontsize=10)
         lrate_ax.set_yscale('log')
 
         fig.canvas.mpl_connect('key_press_event', self._keypress_callback)
@@ -919,16 +1063,19 @@ class UIDisplay(object):
         self._show_weight_contours = True
         # start main UI loop (training is in the thread):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
-        
+        cleanup_counter = 0  # Track when to do matplotlib cleanup
+        fig.tight_layout()
+        LPT.reset(enable=False, burn_in=4, display_after=100,save_filename = "loop_timing_log.txt")
         while not self._shutdown and (self._worker is None or self._worker.is_alive()):
             # try:
+            LPT.mark_loop_start()
             if artists['train_img'] is None or self._update_plots:
                 # mask out pixels with zero weight in self._sim._weight_grid
                 img_out = self._sim.image_train.copy()
                 if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
                     # apply contour lines at 20% intervals
                     n_cont = 7
-                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(0.0, self._center_weight_params['weight'], n_cont, endpoint=True)[1:]]
+                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
                     colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
                     for level_ind, contours in enumerate(contour_levels):
                         for contour in contours:
@@ -936,39 +1083,41 @@ class UIDisplay(object):
                             img_out[contour[:, 0], contour[:, 1], :] = colors[level_ind]
                     logging.info("Overlayed weight contours on training image.")
 
-                artists['train_img'] = train_ax.imshow(img_out)
+                if artists['train_img'] is None:
+                    artists['train_img'] = train_ax.imshow(img_out)
+                else:
+                    artists['train_img'].set_data(img_out)
             # else:  # FUTURE: replace if training image changes
             #     artists['train_img'].set_data(self._sim.image_train)
             cmd =( "\n('w' to hide weight contours)" if self._show_weight_contours else "\n('w' to show weight contours)")\
                 if self._center_weight_params is not None else ""
-            train_ax.set_title("Training cycle %i/%s...\ntarget image %i x %i%s" %
+            train_ax.set_title("Training cycle %i/%s, target image %i x %i%s" %
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
-
-            # if not weights_plotted:
-            #     if self._center_weight_params is not None and self._sim.weight_cross_sections is not None and weight_ax is not None:
-            #         weight_ax.cla()
-            #         xc, yc = self._sim.weight_cross_sections['x'], self._sim.weight_cross_sections['y']
-            #         weight_ax.plot(np.linspace(0, 1.0, xc.size), xc, 'r-', label='X cross-section')
-            #         weight_ax.plot(np.linspace(0, 1.0, yc.size), yc, 'b-', label='Y cross-section')
-            #         weight_ax.set_title("Sample Weights Cross-Sections")
-            #         #weight_ax.set_ylabel("Relative Weight")
-            #         #weight_ax.set_xlabel("Pixel Index")
-            #         weight_ax.legend(fontsize=8)
-            #         # turn off x axis labels, tickes
-            #         weight_ax.tick_params(labeltop=False, labelbottom=False, labelleft=True, labelright=False,
-            #                                 left=True, right=False, bottom=False, top=False)
-            #         weight_ax.set_ylim(0.0, self._center_weight_params['weight'] * 1.1)
-            #         # add grid
-            #         weight_ax.grid(which='both', axis='y')
-            #         weights_plotted=True
+            LPT.add_marker("train image done")
             
 
             if self._output_image is not None:
                 # Can take a while to generate the first image
-                out_ax.set_title("Cycle %i loss: %.5f\nOutput Image %s" % (self._cycle, self._loss_history[-1][-1] if len(self._loss_history) > 0 else 0.0, self._output_image.shape))
+                out_ax.set_title("Cycle %i loss: %.5f\nOutput Image wxh = %s" % (self._cycle, 
+                                                                           self._loss_history[-1]['final_loss'] if len(self._loss_history) > 0 else -1.0, 
+                                                                           self._output_image.shape[:2][::1]))
                 out_img =self._output_image
-                self._sim.draw_div_units(weight_ax, output_image=out_img, norm_colors=True)
+                self._sim.draw_div_units(out_unit_ax, output_image=out_img, plot_units=self._show_dividers)
+                
+                div_units_str = ""
+                if self.n_div['circular'] > 0:
+                    div_units_str += "%i Circle units " % (self.n_div['circular'],)
+                if self.n_div['linear'] > 0:
+                    div_units_str += "%i Line units (lines use the %i-parameterization)" % (self.n_div['linear'], self._line_params)
+                if self.n_div['sigmoid'] > 0:
+                    div_units_str += "%i Sigmoid units" % (self.n_div['sigmoid'], )
+                cmd = "Plotting division units (hit 'd' to hide)." if self._show_dividers else "(Hit 'd' to plot division units.)"
+                out_unit_ax.set_title("Output image, model %s\n%s" % (div_units_str, cmd), fontsize=10)
+                # turn off x and y axes
+                out_unit_ax.axis("off")
+                # set aspect equal
+                
 
                         
                 if artists['out_img'] is None:
@@ -978,29 +1127,96 @@ class UIDisplay(object):
                     artists['out_img'].set_data(out_img)
                     out_ax.axis("off")
                     out_ax.set_aspect('equal')
-
+            LPT.add_marker("output image done")
+            lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
             if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
                 """
-                Plot the individual minibatch losses, and their mean per cycle on top.   
+                X-axis will count CYCLES. 
+                
+                For the loss history, plot each minibatch as a dot, the epoch means as red line segments, and the cycle means as yellow lines
+                Show the final loss as a yellow dot at the end of each cycle.
                 """
                 if len(self._loss_history) ==0 or len(self._l_rate_history) == 0:
                     self._update_plots = False
                     continue
                 graph_update_cycle = self._cycle
-                all_losses = np.hstack(self._loss_history)
-                loss_sizes = [np.array(lh).size for lh in self._loss_history]
-                cycle_x = np.hstack([np.linspace(c, c+1.0, size, endpoint=False) for c, size in zip(range(len(loss_sizes)), loss_sizes)])
-                total_xy = np.array((cycle_x, all_losses)).T
-                if artists['loss'] is None:
-                    artists['loss'] = loss_ax.plot(total_xy[:, 0], total_xy[:, 1], 'b.', label='Loss per step')[0]
-                    loss_ax.set_yscale('log')
-                else:
-                    artists['loss'].set_data(total_xy[:, 0], total_xy[:, 1])
-                first_ind = 0 if self._show_all_hist else all_losses.size- np.sum(loss_sizes[-max_hist_cycles:])
-                smallest, biggest = all_losses[first_ind:].min(), all_losses[first_ind:].max()
                 
-                loss_ax.set_ylim(smallest * 0.9, biggest * 1.1)
+                # Prepare data
+                n_cycles = len(self._loss_history)
+                n_minibatches_per_epoch = len(self._loss_history[-1]['epochs'][0])
+                epoch_x_offset_per_cycle = np.linspace(0, 1, self._epochs_per_cycle, endpoint=False)
+                minibatch_x_offset_per_epoch =  np.linspace(0, 1.0/self._epochs_per_cycle,  n_minibatches_per_epoch, endpoint=False)
+                
+                minibatch_x = []
+                epoch_x0 = []  # means plotted with lines go from x0 to x1 (epochs and cycles)
+                cycle_x0 = np.arange (n_cycles)
+                cycle_x1 = cycle_x0 + 1.0
+                
+                cycle_means = []
+                minibatch_losses = []
+                epoch_means = []
+                
+                
+                for c_ind, cyc_loss in enumerate(self._loss_history[-n_cycles:]):
+                    e_losses = [np.mean(ep) for ep in cyc_loss['epochs']]
+                    cycle_means.append(np.mean(e_losses))
+                    e_x =  c_ind + epoch_x_offset_per_cycle
+                    epoch_x0.extend(e_x)
+                    epoch_means.extend(e_losses)
+                    
+                    for e_ind, ep in enumerate(cyc_loss['epochs']):
+                        mb_x = c_ind + epoch_x_offset_per_cycle[e_ind] + minibatch_x_offset_per_epoch
+                        minibatch_x.extend(mb_x)
+                        minibatch_losses.extend(ep)
+                
+                def _make_flat_line_segments(x0, x1, y):
+                    x = np.zeros(2 * len(y))
+                    y_flat = np.zeros(2 * len(y))
+                    x[0::2] = x0
+                    x[1::2] = x1
+                    y_flat[0::2] = y
+                    y_flat[1::2] = y
+                    return x, y_flat
+                
+                # Filter if not showing all history
+                if not self._show_all_hist and n_cycles > max_hist_cycles:
+                    first_ind = n_cycles - max_hist_cycles
+                    minibatch_x = minibatch_x[first_ind * self._epochs_per_cycle * n_minibatches_per_epoch:]
+                    minibatch_losses = minibatch_losses[first_ind * self._epochs_per_cycle * n_minibatches_per_epoch:]
+                    epoch_x0 = epoch_x0[first_ind * self._epochs_per_cycle:]
+                    epoch_means = epoch_means[first_ind * self._epochs_per_cycle:]
+                    cycle_x0 = cycle_x0[first_ind:]
+                    cycle_x1 = cycle_x1[first_ind:]
+                    cycle_means = cycle_means[first_ind:]
+                
+                cycle_x, cycle_means = _make_flat_line_segments(cycle_x0, cycle_x1, cycle_means)
+                epoch_x, epoch_means = _make_flat_line_segments(epoch_x0, epoch_x0[1:] + [epoch_x0[-1] + 1.0/self._epochs_per_cycle], epoch_means)
+                minibatch_x = np.array(minibatch_x)
+                minibatch_losses = np.array(minibatch_losses)
+                
+                # Plot / update loss axis
+                if artists['loss'] is None:
+                    artists['loss'] = {'minibatch_data': loss_ax.plot(minibatch_x, minibatch_losses, 'b.', label='Minibatch Loss')[0],
+                                       'epoch_means': loss_ax.plot(epoch_x, epoch_means, 'r-', label='Epoch Means')[0],
+                                       'cycle_means': loss_ax.plot(cycle_x, cycle_means, 'g-', label='Cycle Means')[0]}
+                    loss_ax.legend(loc='lower left', fontsize='small')
+                    # Set y to log-scale
+                    loss_ax.set_yscale('log')
+                    
+                else:
+                    artists['loss']['minibatch_data'].set_data(minibatch_x, minibatch_losses)
+                    artists['loss']['epoch_means'].set_data(epoch_x, epoch_means)
+                    artists['loss']['cycle_means'].set_data(cycle_x, cycle_means)
+                # set x and y limits (x should be flush to cycle boundaries, y should have a .05 margin top and bottom)
+                x_min, x_max = cycle_x0[0], cycle_x1[-1]
+                y_min, y_max = np.min(minibatch_losses), np.max(minibatch_losses)
+                loss_ax.set_xlim(x_min - 0.025 * (x_max - x_min), x_max + 0.025 * (x_max - x_min))
+                y_range = y_max - y_min
+                loss_ax.set_ylim(y_min/10.0**.1, y_max*10.0**.1)
 
+                cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
+                loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
+                LPT.add_marker("loss plot done")
                 # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
                 # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
                 lrate_y = np.repeat(np.array(self._l_rate_history), 2)
@@ -1016,7 +1232,7 @@ class UIDisplay(object):
                     artists['lrate'].set_data(lrate_x, lrate_y)
                 first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
                 lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
-                lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
+                
 
                 # set shared x limit
                 if  self._show_all_hist:
@@ -1026,14 +1242,25 @@ class UIDisplay(object):
                     x_max = self._cycle + .1
                     x_min = max(0, self._cycle - max_hist_cycles) - .1
                 lrate_ax.set_xlim(x_min, x_max)
-                
+                LPT.add_marker("lrate plot done")
             self._update_plots = False
 
-            fig.tight_layout()
+            # Periodic cleanup to prevent matplotlib memory accumulation
+            cleanup_counter += 1
+            if False:#cleanup_counter % 50 == 0:  # Every 50 iterations
+                # Clear matplotlib's internal caches
+                fig.canvas.flush_events()
+                # Force garbage collection of matplotlib artists
+                import gc
+                gc.collect()
+                LPT.add_marker("cleanup done")
+
             plt.draw()
+            LPT.add_marker("draw done")
             fig.canvas.flush_events()  # Force canvas to update
-                
-            plt.pause(0.1)
+            LPT.add_marker("flush done")
+            plt.pause(0.01)
+            LPT.add_marker("pause done")
             # except Exception as e:
             #     logging.error(f"Error updating GUI: {e}")
             #     plt.pause(0.1)  # Longer pause on error
@@ -1094,22 +1321,44 @@ def get_args():
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("-w", "--weigh_center", 
-                        help="Weigh pixels nearer the center higher during training by this radius / spread / flatness and x, y offsets.",
-                        nargs=5, type=float, default=[1.0, 2.0])
+                        help="Weigh pixels nearer the center higher during training by this r_inner, r_outer, lr_max, and x, y offsets.",
+                        nargs=5, type=float, default=[])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
+    parser.add_argument('-d', '--render_dividers', type=int, nargs=4, default=None, 
+                    help="Generate output images with division units rendered as lines, params are THICKNESS RED GREEN BLUE (ints)")
+
     parsed = parser.parse_args()
+    
+    # Assemble various arg collections:
+    
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
-    center_weight = {'weight': parsed.weigh_center[0], 
-                     'flatness': parsed.weigh_center[2],
-                     "xy_offsets_rel": (parsed.weigh_center[3], parsed.weigh_center[4]),
-                     'sigma': parsed.weigh_center[1]} if parsed.weigh_center[0] != 1.0 else None
-    # print("CENTER WEIGHT PARAMS:  ", center_weight)
+    
+    if parsed.render_dividers is not None:
+        div_render = {'div_thickness': int(parsed.render_dividers[0]), 
+                      'div_color_f': ((parsed.render_dividers[1]/255.0), 
+                                      (parsed.render_dividers[2]/255.0), 
+                                      (parsed.render_dividers[3]/255.0))}
+    else:
+        div_render = None
+        
+    if len(parsed.weigh_center) == 5:
+        center_weight = {'w_max': parsed.weigh_center[0], 
+                         'r_inner': parsed.weigh_center[1],
+                         'r_outer': parsed.weigh_center[2],  
+                         'offsets_xy_rel': (parsed.weigh_center[3], parsed.weigh_center[4])}
+    elif len(parsed.weigh_center) != 0:
+        print(parsed.weigh_center)
+        raise Exception("If using --weigh_center, must provide 5 values:  r_inner, r_outer, w_max, x_offset_rel, y_offset_rel")
+    else:
+        center_weight = None
+    
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
-              'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,
+              'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
+    
     return parsed, kwargs
 
 
@@ -1125,6 +1374,6 @@ if __name__ == "__main__":
     print_args['_model_file'] = parsed.model_file
     print_args['_test_image'] = parsed.test_image
     pprint.pprint(print_args)
-
+    
     s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file, **kwargs)
     s.run()

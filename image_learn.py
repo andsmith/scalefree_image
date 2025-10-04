@@ -84,6 +84,8 @@ class ScaleInvariantImage(object):
                          'output_image': None}
         self.anneal_temp = 0.0
         self._lims_set = False
+        
+        self.cur_loss = -1
 
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
@@ -264,10 +266,12 @@ class ScaleInvariantImage(object):
             #     img_to_show = output_image
             img_to_show = output_image
         else:
-            img_to_show = self.image_train
+            return
 
         image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
         if self._artists['output_image'] is None:
+            
+            #print("\n\n\n SHOW OUTPUT IMAGE:  %s \n\n\n" % (img_to_show.shape,))
             self._artists['output_image'] = ax.imshow(img_to_show, extent=image_extent)
         else:
             self._artists['output_image'].set_data(img_to_show)
@@ -448,7 +452,7 @@ class ScaleInvariantImage(object):
     
         return model
 
-    def get_loss(self):
+    def get_unweighted_loss(self):
         loss = self._model.evaluate(self._input, self._output, batch_size=8192, verbose=0)
         logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
         return loss
@@ -483,6 +487,7 @@ class ScaleInvariantImage(object):
                         batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
         # Get loss for each step
         loss_history = batch_losses.losses
+        self.cur_loss = np.mean(loss_history[-1]) if len(loss_history) > 0 else -2
 
         logging.info("Batch losses for cycle %i has %i epochs, each with %i minibatches" % (self.cycle, len(loss_history), len(loss_history[0])))
         self.cycle += 1
@@ -687,12 +692,13 @@ class UIDisplay(object):
         self._nogui = nogui
         self._metadata = []
         self.final_loss = None
-        self._show_dividers = True
+        self._show_dividers = False
         self._ui_flags = {n:False for n in range(10)}  # for keypress toggles
         self.div_render_params = div_render_params if div_render_params is not None else {}
         self._anneal = anneal_args
         self._show_all_history = True
-        
+        self.curr_loss_unweighted = -1
+        self.last_epoch_mean_loss = -1
         self._kwargs = kwargs  # save for later if needed
         
         if learning_rate_final is not None:
@@ -852,11 +858,11 @@ class UIDisplay(object):
 
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
-            cur_loss = self._sim.get_loss()
+            cur_loss_uw = self._sim.get_unweighted_loss()
             frame_name = self._write_frame(self._output_image)  # Create & save image
             init_meta = {'cycle': self._sim.cycle,
                          'learning_rate': self._learn_rate,
-                         'current_loss': cur_loss,
+                         'current_loss': cur_loss_uw,
                          'filename': frame_name}
             self._metadata.append(init_meta)
             self._write_metadata()
@@ -871,8 +877,8 @@ class UIDisplay(object):
                 anneal_decay = (self._anneal[1]/self._anneal[0]) ** (1.0 / n_epochs)  # decay per epoch
                 logging.info("Using Langevin dynamics with initial temp %.6f, decay %.6f per epoch over %i epochs." %
                             (anneal_temp, anneal_decay, n_epochs))
-            
-        cur_loss = -1.0
+
+        self.curr_loss_unweighted = -1.0
         while (max_iter==-1 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
@@ -890,19 +896,25 @@ class UIDisplay(object):
                                               learning_rate=self._learn_rate,
                                               verbose=self._verbose, 
                                               noise_temps=anneal_temps)
-            cur_loss = self._sim.get_loss()
+            cur_loss_uw = self._sim.get_unweighted_loss()
+            last_epoch_mean_loss = np.mean(new_losses[-1]) if len(new_losses) > 0 else -1
             output_image = self._gen_image()
-
+            
+            
             with self._hist_lock:
+                
+                
+                self.curr_loss_unweighted = cur_loss_uw
+                self.last_epoch_mean_loss = last_epoch_mean_loss    
                 self._output_image = output_image
                 self._l_rate_history.append(self._learn_rate)
                 self._anneal_history.append(anneal_temps.tolist())
-                self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
+                self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss_uw})
                 
             self._cycle = self._sim.cycle  # update AFTER saving data, since train_more increments it at the end
 
             frame_name = self._write_frame(self._output_image)  # Create & save image
-            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss, 'filename': frame_name})
+            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss_uw, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
             out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
@@ -929,10 +941,10 @@ class UIDisplay(object):
             logging.info("To make a movie from the images, try:")
             logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
                          (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
-        self.final_loss = cur_loss
-        logging.info("Final loss after %i cycles:  %.6f" % (run_cycle, cur_loss))
-        return cur_loss
-    
+        self.final_loss = cur_loss_uw
+        logging.info("Final loss after %i cycles:  %.6f" % (run_cycle, cur_loss_uw))
+        return cur_loss_uw
+
     def _gen_image(self, shape=None):
         if shape is None:
             train_shape = self._sim.image_train.shape
@@ -1028,6 +1040,7 @@ class UIDisplay(object):
 
         if debug_epochs_nothread>-1:
             logging.info("Debug mode, running training in main thread.")
+            
             loss = self._train_thread(max_iter = debug_epochs_nothread)
             self._output_image = self._gen_image()
             #fig, ax = plt.subplots(1,1)
@@ -1046,9 +1059,6 @@ class UIDisplay(object):
         while self._sim.image_train is None:
             time.sleep(0.05)
 
-        
-        # import ipdb; ipdb.set_trace()
-        
         plt.ion()            
         fig = plt.figure(figsize=(12,8))
 
@@ -1102,7 +1112,12 @@ class UIDisplay(object):
         lrate_ax.tick_params(labeltop=False, labelbottom=False)# turn off x tick labels for lrate
         lrate_ax.set_ylabel("Learning Rate")
         train_ax.axis("off")        
-        out_unit_ax.axis("off")
+        #out_unit_ax.axis("off")
+        # turn off x ticks, ylabel & ticks for out_unit_ax
+        out_unit_ax.tick_params(labeltop=False, labelbottom=False)
+        out_unit_ax.set_ylabel("")
+        out_unit_ax.set_xticks([])
+        out_unit_ax.set_yticks([])
 
         loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
         loss_ax.set_ylabel("Loss")
@@ -1116,7 +1131,7 @@ class UIDisplay(object):
         lrate_ax.set_ylabel("")  # Learning Rate")
         lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
         lrate_title += "\nCurrent Annealing Temp:  %.6f" % (self._sim.anneal_temp,) if self._sim.anneal_temp > 0 else ""
-        lrate_ax.set_title(lrate_title, fontsize=10)
+        lrate_ax.set_title(lrate_title, fontsize=12)
         lrate_ax.set_yscale('log')
         
         # Architecture string, for titles
@@ -1151,11 +1166,11 @@ class UIDisplay(object):
                     img_out[contour[:, 0], contour[:, 1], :] = colors[level_ind]
             logging.info("Overlayed weight contours on training image.")
         artists['train_img'] = train_ax.imshow(img_out)
-        
+        #print("\n\n\n SHOW TRAINING IMAGE:  %s \n\n\n" % (img_out.shape,))
         
         LPT.reset(enable=False, burn_in=4, display_after=100,save_filename = "loop_timing_log.txt")
         plt.tight_layout()
-        # import ipdb; ipdb.set_trace()
+        tl_times=[]
         while not self._shutdown and (self._worker is None or self._worker.is_alive()):
             # try:
             LPT.mark_loop_start()
@@ -1167,13 +1182,20 @@ class UIDisplay(object):
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
             cmd = "('a' to show last 5 cycles only)" if self._show_all_history else "('a' to show all cycles)"
-            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
+            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=12)
             if anneal_ax is not None:
-                anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=10)
+                anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=12)
             lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
-            lrate_ax.set_title(lrate_title, fontsize=10)
-            cmd = "Plotting division units (hit 'd' to hide)." if self._show_dividers else "(Hit 'd' to plot division units.)"
-            out_unit_ax.set_title("Output image, model %s\n%s" % (div_units_str, cmd), fontsize=10)
+            lrate_ax.set_title(lrate_title, fontsize=12)
+
+            cmd = "(Hit 'd' to hide division units.)" if self._show_dividers else "(Hit 'd' to plot division units.)"
+            out_unit_ax.set_title("Output image %s" % (cmd,), fontsize=12)
+            last_epoch_loss =  self.last_epoch_mean_loss
+            cur_loss = self.curr_loss_unweighted
+            wt = " (weighted)" if self._center_weight_params is not None else ""
+            loss_str = "   Last cycle mean loss:  %.6f\nLast training epoch loss%s: %.6f" % (cur_loss, wt,last_epoch_loss)
+            
+            out_unit_ax.set_xlabel(loss_str, fontsize=12)
             
 
 
@@ -1202,9 +1224,12 @@ class UIDisplay(object):
                 first_cycle = 0 if self._show_all_history else max(0, self._cycle - 5)
                 
                 with self._hist_lock:
+                    
                     loss_history = deepcopy(self._loss_history[first_cycle:])
                     l_rate_history = deepcopy(self._l_rate_history[first_cycle:])
                     anneal_history = deepcopy(self._anneal_history[first_cycle:]) if self._anneal is not None else None
+                    
+                    
                     
                 epoch_means = []
                 epoch_means_x = []
@@ -1265,8 +1290,8 @@ class UIDisplay(object):
                 if artists['loss'] is None:
                     artists['loss'] = {'minibatch_data': loss_ax.plot(minibatch_x, minibatch_losses, 'b.', label='Minibatch Loss')[0],
                                        'epoch_means': loss_ax.plot(ex, ey, 'r-', label='Epoch Means')[0],
-                                       'cycle_means': loss_ax.plot(cx, cy, 'g-', label='Cycle Means')[0]}
-                    loss_ax.legend(loc='lower left', fontsize='small')
+                                       'cycle_means': loss_ax.plot(cx, cy, '-', color=np.array((8,255,8))/255.0, label='Cycle Means')[0]}
+                    loss_ax.legend(loc='upper right')
                     # Set y to log-scale
                     loss_ax.set_yscale('log')
                     
@@ -1324,6 +1349,15 @@ class UIDisplay(object):
                 import gc
                 gc.collect()
                 LPT.add_marker("cleanup done")
+            t0 = time.perf_counter()                
+            plt.tight_layout()
+            tl_times.append(time.perf_counter() - t0)
+            if len(tl_times) % 10 == 0:
+                logging.info("Tight_layout time (last %i iters): min %.3f sec, max %.3f sec, mean %.3f sec" % (len(tl_times), 
+                                                                                                               np.min(tl_times), 
+                                                                                                               np.max(tl_times),
+                                                                                                               np.mean(tl_times)))
+                #tl_times=[]
 
             plt.draw()
             fig.canvas.flush_events()  # Force canvas to update

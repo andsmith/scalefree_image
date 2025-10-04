@@ -19,7 +19,7 @@ import os
 import logging
 from util import make_input_grid, downscale_image, make_central_weights, fade
 import argparse
-from threading import Thread
+from threading import Thread, Lock
 from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
@@ -57,7 +57,7 @@ class ScaleInvariantImage(object):
         :param learning_rate_initial: initial learning rate for Adadelta optimizer
         :param downscale: downscale factor for training image (1.0 = full size, 0.5 = half size, etc)
         :param center_weight_params: if not None, a dict with keys: 'r_inner' (float), 'r_outer' (float), 'w_max' (float), and 'xy_offset' (tuple of floats)
-
+        :param line_params: 2 or 3, parameterization of line units (2 = angle + offset, 3 = angle + center + offset)
         """
         self.image_raw = image_raw
         self._line_params = line_params
@@ -82,7 +82,7 @@ class ScaleInvariantImage(object):
                          'sigmoid': { 
                              'bands': []},
                          'output_image': None}
-
+        self.anneal_temp = 0.0
         self._lims_set = False
 
         if state_file is not None:
@@ -458,7 +458,7 @@ class ScaleInvariantImage(object):
         self._model.optimizer.learning_rate.assign(self._learning_rate)
         logging.info("Updated learning rate to:  %.6f" % (self._learning_rate,))
 
-    def train_more(self, epochs, learning_rate=None, verbose=True):
+    def train_more(self, epochs, learning_rate=None, noise_temps=None, verbose=True):
         if learning_rate is not None and learning_rate != self._learning_rate:
             self._update_learning_rate(learning_rate)
 
@@ -466,6 +466,10 @@ class ScaleInvariantImage(object):
 
         # Save numpy training set:
         # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
+        self.anneal_temp = noise_temps[0] if noise_temps is not None else 0.0
+        if noise_temps is not None:
+            # Langevin dynamics noise:
+            noise_sds = np.sqrt(2 * learning_rate * np.array(noise_temps))
 
         rand = np.random.permutation(input.shape[0])
         input = input[rand]
@@ -654,7 +658,7 @@ class UIDisplay(object):
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, 
-                 synth_image_name = None,verbose=True, div_render_params=None, **kwargs):
+                 synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, **kwargs):
         self._verbose = verbose
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
@@ -677,6 +681,8 @@ class UIDisplay(object):
         self._output_image = None
         self._loss_history = [] # list {'cycle': cycle_index,'epochs': [list of minibatch losses for each epoch]}
         self._l_rate_history = []
+        self._anneal_history = []
+        self._hist_lock = Lock()  # for history lists
         self._batch_size = batch_size
         self._nogui = nogui
         self._metadata = []
@@ -684,6 +690,10 @@ class UIDisplay(object):
         self._show_dividers = True
         self._ui_flags = {n:False for n in range(10)}  # for keypress toggles
         self.div_render_params = div_render_params if div_render_params is not None else {}
+        self._anneal = anneal_args
+        self._show_all_history = True
+        
+        self._kwargs = kwargs  # save for later if needed
         
         if learning_rate_final is not None:
             if learning_rate_final < 0:
@@ -713,13 +723,24 @@ class UIDisplay(object):
                     metadata = json.load(f)
                 logging.info("Loaded metadata from:  %s" % (meta_filename,))
                 self._metadata = metadata['frames']  if 'frames' in metadata else metadata
+                
+                if 'anneal_history' in metadata:
+                    self._anneal_history = metadata['anneal_history'] 
+                    logging.info("Loaded anneal history with %i entries." % (len(self._anneal_history),))
+                else:
+                    logging.warning("Metadata found but contains no anneal history")
+                    self._anneal_history = []
+                
                 if 'loss_history' in metadata:
                     self._loss_history = metadata['loss_history'] 
+                    logging.info("Loaded loss history with %i entries." % (len(self._loss_history),))
                 else:
                     logging.warning("Metadata found but contains no loss history")
                     self._loss_history = []
+                    
                 if 'learning_rate_history' in metadata:
                     self._l_rate_history = metadata['learning_rate_history'] if 'learning_rate_history' in metadata else []
+                    logging.info("Loaded learning rate history with %i entries." % (len(self._l_rate_history),))
                 else:
                     logging.warning("Metadata found but contains no learning rate history")
                     self._l_rate_history = []
@@ -799,7 +820,7 @@ class UIDisplay(object):
         cv2.imwrite(file_path, train_img[:, :, ::-1])
         logging.info("Wrote training image:  %s" % (file_path,))
 
-    def _train_thread(self, max_iter=0):
+    def _train_thread(self, max_iter=-1):
         # TF 2.x doesn't use sessions or graphs in eager
 
         # Print full model architecture
@@ -825,6 +846,9 @@ class UIDisplay(object):
         logging.info("Generated output image of shape:  %s" % (self._output_image.shape,))       
         self._save_training_image()
         # if we're continuing, don't store the new output image
+        
+        ### DEBUG TEMP
+        cv2.imwrite("DEBUG_initial_image.png", (self._output_image * 255).astype(np.uint8)[:, :, ::-1])
 
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
@@ -837,23 +861,46 @@ class UIDisplay(object):
             self._metadata.append(init_meta)
             self._write_metadata()
 
-        cur_loss = None
-        while (max_iter==0 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
+        anneal_temp, anneal_decay = 0, 0
+        if self._anneal is not None:
+            anneal_temp = self._anneal[0]
+            if self._run_cycles == 0:
+                anneal_decay = self._anneal[1]  # if running forever, just use the decay constant
+            else:
+                n_epochs = self._epochs_per_cycle * (self._run_cycles if self._run_cycles > 0 else 1)
+                anneal_decay = (self._anneal[1]/self._anneal[0]) ** (1.0 / n_epochs)  # decay per epoch
+                logging.info("Using Langevin dynamics with initial temp %.6f, decay %.6f per epoch over %i epochs." %
+                            (anneal_temp, anneal_decay, n_epochs))
+            
+        cur_loss = -1.0
+        while (max_iter==-1 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
             if self._shutdown:
                 break
             logging.info("Training batch_size: %i, cycle: %i of %i, learning_rate: %.6f" %
                          (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
-
-            new_losses = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
+            
+            if self._anneal is not None:
+                anneal_temps = anneal_temp * (anneal_decay ** np.arange(self._epochs_per_cycle))
+                logging.info("Using Langevin dynamics with noise temps:  %.6f, ..., %.6f" % (anneal_temps[0], anneal_temps[-1]))
+                anneal_temp = anneal_temps[-1]  * anneal_decay  # update for next cycle
+            else:
+                anneal_temps = np.zeros(self._epochs_per_cycle)
+            
+            new_losses = self._sim.train_more(self._epochs_per_cycle, 
+                                              learning_rate=self._learn_rate,
+                                              verbose=self._verbose, 
+                                              noise_temps=anneal_temps)
             cur_loss = self._sim.get_loss()
-            self._l_rate_history.append(self._learn_rate)
-            self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
+            output_image = self._gen_image()
+
+            with self._hist_lock:
+                self._output_image = output_image
+                self._l_rate_history.append(self._learn_rate)
+                self._anneal_history.append(anneal_temps.tolist())
+                self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
+                
             self._cycle = self._sim.cycle  # update AFTER saving data, since train_more increments it at the end
 
-
-
-
-            self._output_image = self._gen_image()
             frame_name = self._write_frame(self._output_image)  # Create & save image
             self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss, 'filename': frame_name})
             self._write_metadata()
@@ -925,7 +972,8 @@ class UIDisplay(object):
                     'train_image_file': os.path.abspath(self.get_filename('train-image')),
                     'train_downscale': self._downscale,
                     'loss_history': self._loss_history,
-                    'learning_rate_history': self._l_rate_history}
+                    'learning_rate_history': self._l_rate_history,
+                    'anneal_history': self._anneal_history}
         with open(meta_file_path, 'w') as f:
             json.dump(metadata, f)
         logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
@@ -946,8 +994,8 @@ class UIDisplay(object):
             logging.info("Toggled divider unit annotation:  %s" % ("on" if self._show_dividers else "off",))
             self._update_plots = True
         elif event.key == 'a':
-            self._show_all_hist = not self._show_all_hist
-            logging.info("Toggled loss history display mode:  %s" % ("all cycles" if self._show_all_hist else "last 5 cycles only",))   
+            self._show_all_history= not self._show_all_history
+            logging.info("Toggled showing all loss history:  %s" % ("on" if self._show_all_history else "off",))
             self._update_plots = True
         elif event.key == 'w':
             self._show_weight_contours = not self._show_weight_contours
@@ -964,32 +1012,30 @@ class UIDisplay(object):
     def get_train_image(self):
         return self._sim.image_train
 
-    def run(self, debug_epochs_nothread=0):
+    def run(self, debug_epochs_nothread=-1):
         """
         Run as interactive matplotlib window, updating when new image is available.
            * left is the current training image
            * middle is the current output image
            * right is the loss history
+        :param debug_epochs_nothread: if > -1, run this many epochs in the main thread instead of a worker thread (for debugging)
         """
         if self._just_image is not None:
             img_shape = (np.array(self._sim.image_raw.shape[:2]) * self._display_multiplier).astype(int)
             img = self._gen_image(shape=img_shape)
             self._write_image(img, filename = self._just_image)
             return
-        
-        if debug_epochs_nothread>0:
+
+        if debug_epochs_nothread>-1:
             logging.info("Debug mode, running training in main thread.")
             loss = self._train_thread(max_iter = debug_epochs_nothread)
             self._output_image = self._gen_image()
-            fig, ax = plt.subplots(1,1)
-            self._sim.draw_div_units(ax=ax, output_image=self._output_image, plot_units=True, draw_flags=self._ui_flags)
-            plt.show()
+            #fig, ax = plt.subplots(1,1)
+            #self._sim.draw_div_units(ax=ax, output_image=self._output_image, plot_units=True, draw_flags=self._ui_flags)
+            # plt.show()
             self._worker = None
         else:
             self._start()
-            
-        max_hist_cycles = 5
-        self._show_all_hist = True  # if false only show last max_hist_cycles for plots
 
         if self._nogui:
             logging.info("No GUI mode, waiting for training to finish...")
@@ -1000,6 +1046,9 @@ class UIDisplay(object):
         while self._sim.image_train is None:
             time.sleep(0.05)
 
+        
+        # import ipdb; ipdb.set_trace()
+        
         plt.ion()            
         fig = plt.figure(figsize=(12,8))
 
@@ -1036,10 +1085,16 @@ class UIDisplay(object):
             train_ax = fig.add_subplot(grid[:4, 0])
             out_unit_ax = fig.add_subplot(grid[4:, 0])
         
-        #if self._center_weight_params is not None:            
-        lrate_ax = fig.add_subplot(grid[:2, -1])
-        loss_ax = fig.add_subplot(grid[2:5, -1],sharex=lrate_ax)
-        out_ax = fig.add_subplot(grid[5:, -1])
+        #if self._center_weight_params is not None: 
+        if self._anneal is None:           
+            lrate_ax = fig.add_subplot(grid[:3, -1])
+            loss_ax = fig.add_subplot(grid[3:, -1],sharex=lrate_ax)
+            anneal_ax = None
+        else:
+            lrate_ax = fig.add_subplot(grid[:2, -1])
+            anneal_ax = fig.add_subplot(grid[2:4, -1],sharex=lrate_ax)
+            loss_ax = fig.add_subplot(grid[4:, -1],sharex=lrate_ax)
+        
         weights_plotted=False
         
         lrate_ax.grid(which='major', axis='both')
@@ -1047,14 +1102,31 @@ class UIDisplay(object):
         lrate_ax.tick_params(labeltop=False, labelbottom=False)# turn off x tick labels for lrate
         lrate_ax.set_ylabel("Learning Rate")
         train_ax.axis("off")        
+        out_unit_ax.axis("off")
+
         loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
         loss_ax.set_ylabel("Loss")
-        cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
-        loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
+        cmd = "('a' to show last 5 cycles only)" if self._show_all_history else "('a' to show all cycles)"
+        loss_ax.set_title("Loss history, %i cycles total\n%s" % (len(self._loss_history), cmd), fontsize=10)
+        if anneal_ax is not None:
+            anneal_ax.grid(which='major', axis='both')
+            anneal_ax.set_ylabel("Temp", fontsize=8)
+            anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=10)
 
         lrate_ax.set_ylabel("")  # Learning Rate")
-        lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,), fontsize=10)
+        lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
+        lrate_title += "\nCurrent Annealing Temp:  %.6f" % (self._sim.anneal_temp,) if self._sim.anneal_temp > 0 else ""
+        lrate_ax.set_title(lrate_title, fontsize=10)
         lrate_ax.set_yscale('log')
+        
+        # Architecture string, for titles
+        div_units_str = ""
+        if self.n_div['circular'] > 0:
+            div_units_str += "%i Circle units " % (self.n_div['circular'],)
+        if self.n_div['linear'] > 0:
+            div_units_str += "%i Line units (lines use the %i-parameterization)" % (self.n_div['linear'], self._line_params)
+        if self.n_div['sigmoid'] > 0:
+            div_units_str += "%i Sigmoid units" % (self.n_div['sigmoid'], )
 
         fig.canvas.mpl_connect('key_press_event', self._keypress_callback)
 
@@ -1064,72 +1136,55 @@ class UIDisplay(object):
         # start main UI loop (training is in the thread):
         graph_update_cycle = -1  # last cycle we updated the graph, don't change unless it changes
         cleanup_counter = 0  # Track when to do matplotlib cleanup
-        fig.tight_layout()
+        
+        
+        # Just draw training image once:
+        img_out = self._sim.image_train.copy()
+        if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
+            # apply contour lines at 20% intervals
+            n_cont = 7
+            contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
+            colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
+            for level_ind, contours in enumerate(contour_levels):
+                for contour in contours:
+                    contour = np.round(contour).astype(int)
+                    img_out[contour[:, 0], contour[:, 1], :] = colors[level_ind]
+            logging.info("Overlayed weight contours on training image.")
+        artists['train_img'] = train_ax.imshow(img_out)
+        
+        
         LPT.reset(enable=False, burn_in=4, display_after=100,save_filename = "loop_timing_log.txt")
+        plt.tight_layout()
+        # import ipdb; ipdb.set_trace()
         while not self._shutdown and (self._worker is None or self._worker.is_alive()):
             # try:
             LPT.mark_loop_start()
-            if artists['train_img'] is None or self._update_plots:
-                # mask out pixels with zero weight in self._sim._weight_grid
-                img_out = self._sim.image_train.copy()
-                if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
-                    # apply contour lines at 20% intervals
-                    n_cont = 7
-                    contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
-                    colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
-                    for level_ind, contours in enumerate(contour_levels):
-                        for contour in contours:
-                            contour = np.round(contour).astype(int)
-                            img_out[contour[:, 0], contour[:, 1], :] = colors[level_ind]
-                    logging.info("Overlayed weight contours on training image.")
 
-                if artists['train_img'] is None:
-                    artists['train_img'] = train_ax.imshow(img_out)
-                else:
-                    artists['train_img'].set_data(img_out)
-            # else:  # FUTURE: replace if training image changes
-            #     artists['train_img'].set_data(self._sim.image_train)
+            # Update titles w/dynamic info every loop 
             cmd =( "\n('w' to hide weight contours)" if self._show_weight_contours else "\n('w' to show weight contours)")\
                 if self._center_weight_params is not None else ""
             train_ax.set_title("Training cycle %i/%s, target image %i x %i%s" %
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
-            LPT.add_marker("train image done")
-            
+            cmd = "('a' to show last 5 cycles only)" if self._show_all_history else "('a' to show all cycles)"
+            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
+            if anneal_ax is not None:
+                anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=10)
+            lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
+            lrate_ax.set_title(lrate_title, fontsize=10)
+            cmd = "Plotting division units (hit 'd' to hide)." if self._show_dividers else "(Hit 'd' to plot division units.)"
+            out_unit_ax.set_title("Output image, model %s\n%s" % (div_units_str, cmd), fontsize=10)
 
+
+            # Update output image & draw divider units
             if self._output_image is not None:
-                # Can take a while to generate the first image
-                out_ax.set_title("Cycle %i loss: %.5f\nOutput Image wxh = %s" % (self._cycle, 
-                                                                           self._loss_history[-1]['final_loss'] if len(self._loss_history) > 0 else -1.0, 
-                                                                           self._output_image.shape[:2][::1]))
                 out_img =self._output_image
-                self._sim.draw_div_units(out_unit_ax, output_image=out_img, plot_units=self._show_dividers)
-                
-                div_units_str = ""
-                if self.n_div['circular'] > 0:
-                    div_units_str += "%i Circle units " % (self.n_div['circular'],)
-                if self.n_div['linear'] > 0:
-                    div_units_str += "%i Line units (lines use the %i-parameterization)" % (self.n_div['linear'], self._line_params)
-                if self.n_div['sigmoid'] > 0:
-                    div_units_str += "%i Sigmoid units" % (self.n_div['sigmoid'], )
-                cmd = "Plotting division units (hit 'd' to hide)." if self._show_dividers else "(Hit 'd' to plot division units.)"
-                out_unit_ax.set_title("Output image, model %s\n%s" % (div_units_str, cmd), fontsize=10)
-                # turn off x and y axes
-                out_unit_ax.axis("off")
-                # set aspect equal
-                
+                self._sim.draw_div_units(out_unit_ax, output_image=out_img, plot_units=self._show_dividers)            
+                LPT.add_marker("output image done")
 
-                        
-                if artists['out_img'] is None:
-                    artists['out_img'] = out_ax.imshow(out_img)
-                    out_ax.axis("off")
-                else:
-                    artists['out_img'].set_data(out_img)
-                    out_ax.axis("off")
-                    out_ax.set_aspect('equal')
-            LPT.add_marker("output image done")
-            lrate_ax.set_title("Learning Rate History\nCurrent rate: %.6f" % (self._learn_rate,))
-            if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and self._cycle != graph_update_cycle) or self._update_plots:
+            
+            if (len(self._loss_history) > 0 and len(self._l_rate_history )> 0 and \
+                self._cycle != graph_update_cycle) or self._update_plots:
                 """
                 X-axis will count CYCLES. 
                 
@@ -1140,35 +1195,58 @@ class UIDisplay(object):
                     self._update_plots = False
                     continue
                 graph_update_cycle = self._cycle
+                # Update titles
                 
                 # Prepare data
-                n_cycles = len(self._loss_history)
-                n_minibatches_per_epoch = len(self._loss_history[-1]['epochs'][0])
-                epoch_x_offset_per_cycle = np.linspace(0, 1, self._epochs_per_cycle, endpoint=False)
-                minibatch_x_offset_per_epoch =  np.linspace(0, 1.0/self._epochs_per_cycle,  n_minibatches_per_epoch, endpoint=False)
+                first_cycle = 0 if self._show_all_history else max(0, self._cycle - 5)
                 
-                minibatch_x = []
-                epoch_x0 = []  # means plotted with lines go from x0 to x1 (epochs and cycles)
-                cycle_x0 = np.arange (n_cycles)
-                cycle_x1 = cycle_x0 + 1.0
-                
-                cycle_means = []
-                minibatch_losses = []
-                epoch_means = []
-                
-                
-                for c_ind, cyc_loss in enumerate(self._loss_history[-n_cycles:]):
-                    e_losses = [np.mean(ep) for ep in cyc_loss['epochs']]
-                    cycle_means.append(np.mean(e_losses))
-                    e_x =  c_ind + epoch_x_offset_per_cycle
-                    epoch_x0.extend(e_x)
-                    epoch_means.extend(e_losses)
+                with self._hist_lock:
+                    loss_history = deepcopy(self._loss_history[first_cycle:])
+                    l_rate_history = deepcopy(self._l_rate_history[first_cycle:])
+                    anneal_history = deepcopy(self._anneal_history[first_cycle:]) if self._anneal is not None else None
                     
-                    for e_ind, ep in enumerate(cyc_loss['epochs']):
-                        mb_x = c_ind + epoch_x_offset_per_cycle[e_ind] + minibatch_x_offset_per_epoch
-                        minibatch_x.extend(mb_x)
-                        minibatch_losses.extend(ep)
-                
+                epoch_means = []
+                epoch_means_x = []
+                cycle_means = []
+                cycle_means_x = []                
+                minibatch_x = []
+                minibatch_losses = []
+                lrate_x = []
+                lrate_y = []
+                anneal_temp_x = []
+                anneal_temp_y = []
+                for cyc in range(len(loss_history)):
+                    cyc_ind = first_cycle + cyc
+                    n_epochs = len(loss_history[cyc]['epochs'])
+                    
+                    # x-coord for start of each epoch this cycle:
+                    epoch_x = np.linspace(0, 1, n_epochs, endpoint=False) + cyc_ind
+                    epoch_dx = 1.0 / n_epochs
+                    
+                    # scalar
+                    lrate_x.append(cyc_ind)
+                    lrate_y.append(l_rate_history[cyc])
+                    
+                    if anneal_history is not None:
+                        y = anneal_history[cyc]
+                        if n_epochs != len(y):
+                            raise Exception("Cycle %i has %i epochs but anneal history has %i entries!" % (cyc_ind, n_epochs, len(y)))
+                        anneal_temp_x.extend(epoch_x.tolist())
+                        anneal_temp_y.extend(y)
+                    e_means = []
+                    
+                    for ep in range(n_epochs):
+                        mbh = loss_history[cyc]['epochs'][ep]
+                        mbh_x = np.linspace(0, epoch_dx, len(mbh), endpoint=False) + epoch_x[ep]
+                        minibatch_x.extend(mbh_x.tolist())
+                        minibatch_losses.extend(mbh)
+                        e_means.append(np.mean(mbh))
+                        
+                    epoch_means.extend(e_means)
+                    epoch_means_x.extend(epoch_x.tolist())
+                    cycle_means.append(np.mean(e_means))
+                    cycle_means_x.append(cyc_ind)
+
                 def _make_flat_line_segments(x0, x1, y):
                     x = np.zeros(2 * len(y))
                     y_flat = np.zeros(2 * len(y))
@@ -1177,70 +1255,52 @@ class UIDisplay(object):
                     y_flat[0::2] = y
                     y_flat[1::2] = y
                     return x, y_flat
-                
-                # Filter if not showing all history
-                if not self._show_all_hist and n_cycles > max_hist_cycles:
-                    first_ind = n_cycles - max_hist_cycles
-                    minibatch_x = minibatch_x[first_ind * self._epochs_per_cycle * n_minibatches_per_epoch:]
-                    minibatch_losses = minibatch_losses[first_ind * self._epochs_per_cycle * n_minibatches_per_epoch:]
-                    epoch_x0 = epoch_x0[first_ind * self._epochs_per_cycle:]
-                    epoch_means = epoch_means[first_ind * self._epochs_per_cycle:]
-                    cycle_x0 = cycle_x0[first_ind:]
-                    cycle_x1 = cycle_x1[first_ind:]
-                    cycle_means = cycle_means[first_ind:]
-                
-                cycle_x, cycle_means = _make_flat_line_segments(cycle_x0, cycle_x1, cycle_means)
-                epoch_x, epoch_means = _make_flat_line_segments(epoch_x0, epoch_x0[1:] + [epoch_x0[-1] + 1.0/self._epochs_per_cycle], epoch_means)
-                minibatch_x = np.array(minibatch_x)
-                minibatch_losses = np.array(minibatch_losses)
-                
+
+
                 # Plot / update loss axis
+                
+                ex, ey = _make_flat_line_segments(epoch_means_x, epoch_means_x, epoch_means)
+                cx, cy = _make_flat_line_segments(cycle_means_x, cycle_means_x, cycle_means)
                 if artists['loss'] is None:
                     artists['loss'] = {'minibatch_data': loss_ax.plot(minibatch_x, minibatch_losses, 'b.', label='Minibatch Loss')[0],
-                                       'epoch_means': loss_ax.plot(epoch_x, epoch_means, 'r-', label='Epoch Means')[0],
-                                       'cycle_means': loss_ax.plot(cycle_x, cycle_means, 'g-', label='Cycle Means')[0]}
+                                       'epoch_means': loss_ax.plot(ex, ey, 'r-', label='Epoch Means')[0],
+                                       'cycle_means': loss_ax.plot(cx, cy, 'g-', label='Cycle Means')[0]}
                     loss_ax.legend(loc='lower left', fontsize='small')
                     # Set y to log-scale
                     loss_ax.set_yscale('log')
                     
                 else:
                     artists['loss']['minibatch_data'].set_data(minibatch_x, minibatch_losses)
-                    artists['loss']['epoch_means'].set_data(epoch_x, epoch_means)
-                    artists['loss']['cycle_means'].set_data(cycle_x, cycle_means)
+                    artists['loss']['epoch_means'].set_data(ex, ey)
+                    artists['loss']['cycle_means'].set_data(cx, cy)
                 # set x and y limits (x should be flush to cycle boundaries, y should have a .05 margin top and bottom)
-                x_min, x_max = cycle_x0[0], cycle_x1[-1]
+                x_min, x_max = cycle_means_x[0], cycle_means_x[-1]
                 y_min, y_max = np.min(minibatch_losses), np.max(minibatch_losses)
                 loss_ax.set_xlim(x_min - 0.025 * (x_max - x_min), x_max + 0.025 * (x_max - x_min))
-                y_range = y_max - y_min
                 loss_ax.set_ylim(y_min/10.0**.1, y_max*10.0**.1)
-
-                cmd = "('a' to show last 5 cycles only)" if self._show_all_hist else "('a' to show all cycles)"
-                loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=10)
+                
                 LPT.add_marker("loss plot done")
                 # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
                 # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
-                lrate_y = np.repeat(np.array(self._l_rate_history), 2)
-                lrate_x0 = np.array(range(len(self._l_rate_history)))
-                lrate_x = np.zeros(lrate_y.size)
-                lrate_x[0::2] = lrate_x0
-                lrate_x[1::2] = lrate_x0 + 1.0
+
+                lrate_x, lrate_y = _make_flat_line_segments(lrate_x, np.array(lrate_x) + 1.0 / len(lrate_y), lrate_y)
                 if artists.get('lrate') is None:
                     artists['lrate'] = lrate_ax.plot(lrate_x, lrate_y, 'r-', label='Learning Rate')[0]
                     lrate_ax.set_yscale('log')
-
                 else:
                     artists['lrate'].set_data(lrate_x, lrate_y)
-                first_ind = 0 if self._show_all_hist else max(0, len(self._l_rate_history) - max_hist_cycles)
-                lrate_ax.set_ylim(min(self._l_rate_history[first_ind:]) * 0.9, max(self._l_rate_history[first_ind:]) * 1.1)
                 
-
+                anneal_temp_x, anneal_temp_y = np.array(anneal_temp_x), np.array(anneal_temp_y)
+                if artists.get('anneal') is None and anneal_history is not None:
+                    artists['anneal'] = anneal_ax.plot(anneal_temp_x, anneal_temp_y, label='Anneal Temp')[0]
+                    anneal_ax.set_yscale('log') 
+                elif artists.get('anneal') is not None and anneal_history is not None:
+                    artists['anneal'].set_data(anneal_temp_x, anneal_temp_y)
+                LPT.add_marker("anneal plot done")
+                
                 # set shared x limit
-                if  self._show_all_hist:
-                    x_max = self._cycle + (self._cycle+1)/20 
-                    x_min = -(self._cycle+1)/20
-                else:
-                    x_max = self._cycle + .1
-                    x_min = max(0, self._cycle - max_hist_cycles) - .1
+                x_max = self._cycle + (self._cycle+1)/50 
+                x_min = -(self._cycle+1)/50
                 lrate_ax.set_xlim(x_min, x_max)
                 LPT.add_marker("lrate plot done")
             self._update_plots = False
@@ -1322,13 +1382,15 @@ def get_args():
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parser.add_argument('-d', '--render_dividers', type=int, nargs=4, default=None, 
                     help="Generate output images with division units rendered as lines, params are THICKNESS RED GREEN BLUE (ints)")
-
+    
+    parser.add_argument('--anneal', type=float, nargs=3, default=None, help="Annealing parameters: [T_init] [T_final/decay] [n_cycles]: "+
+                        "where the temperature is exponentially decayed from T_init to T_final over n_cycles (if training for longer, T=0 after n_cycles)." )
     parsed = parser.parse_args()
     
     # Assemble various arg collections:
     
+    # Divider units:
     n_div = {'circular': parsed.circles, 'linear': parsed.lines, 'sigmoid': parsed.sigmoids}
-    
     if parsed.render_dividers is not None:
         div_render = {'div_thickness': int(parsed.render_dividers[0]), 
                       'div_color_f': ((parsed.render_dividers[1]/255.0), 
@@ -1337,6 +1399,7 @@ def get_args():
     else:
         div_render = None
         
+    # Pixel importance weights (optional):
     if len(parsed.weigh_center) == 5:
         center_weight = {'w_max': parsed.weigh_center[0], 
                          'r_inner': parsed.weigh_center[1],
@@ -1347,13 +1410,13 @@ def get_args():
         raise Exception("If using --weigh_center, must provide 5 values:  r_inner, r_outer, w_max, x_offset_rel, y_offset_rel")
     else:
         center_weight = None
-    
+        
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
-              'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final}
-    
+              'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final, 'anneal_args': parsed.anneal}
+    print(parsed.anneal)
     return parsed, kwargs
 
 

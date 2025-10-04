@@ -585,11 +585,12 @@ class ScaleInvariantImage(object):
 
         return img
 
-    def save_state(self, model_filename):
+    def save_state(self, model_filename, path='.'):
         """
         Save only the necessary args in a dict 
         """
         weights = self._model.get_weights()
+        model_filename = os.path.join(path, model_filename)
         logging.info("Saving model weights with %i layers to:  %s" % (len(weights), model_filename))
         data = {'weights': weights,
                 'image_raw': self.image_raw,
@@ -604,6 +605,7 @@ class ScaleInvariantImage(object):
         
         with open(model_filename, 'wb') as outfile:
             cp.dump(data, outfile, protocol=cp.HIGHEST_PROTOCOL)
+        return model_filename
 
     @staticmethod
     def _load_state(model_filepath):
@@ -654,7 +656,7 @@ class UIDisplay(object):
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
                  epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, 
-                 synth_image_name = None,verbose=True, div_render_params=None, **kwargs):
+                 synth_image_name = None,verbose=True, div_render_params=None, model_save_info=None, **kwargs):
         self._verbose = verbose
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
@@ -667,6 +669,7 @@ class UIDisplay(object):
         self._run_cycles = run_cycles
         self._shutdown = False
         self._line_params = line_params
+        self._model_save_info = model_save_info if model_save_info is not None else {'path': '.', 'prefix': ''}
         self._frame_dir = frame_dir
         self._cycle = 0  # epochs_per_cycle epochs of training and an output update increments this
         self._annotate = False
@@ -778,40 +781,45 @@ class UIDisplay(object):
 
     def get_filename(self, which='model'):
         if which == 'model':
-            return "%s_model_%s.pkl" % (self._file_prefix, self._get_arch_str())
+            filename = "%s_model_%s.pkl" % (self._file_prefix, self._get_arch_str())
         elif which == 'frame':
-            return "%s_output_%s_cycle-%.8i.png" % (self._file_prefix, self._get_arch_str(), self._sim.cycle)
+            filename = "%s_output_%s_cycle-%.8i.png" % (self._file_prefix, self._get_arch_str(), self._sim.cycle)
         elif which == 'single-image':
-            return "%s_single_%s.png" % (self._file_prefix, self._get_arch_str())
+            filename = "%s_single_%s.png" % (self._file_prefix, self._get_arch_str())
         elif which == 'train-image':
-            return "%s_train_%s_downscale=%.1f.png" % (self._file_prefix, self._get_arch_str(), self._downscale)
+            filename = "%s_train_%s_downscale=%.1f.png" % (self._file_prefix, self._get_arch_str(), self._downscale)
         elif which == 'metadata':
-            return "%s_metadata_%s.json" % (self._file_prefix, self._get_arch_str())
+            filename = "%s_metadata_%s.json" % (self._file_prefix, self._get_arch_str())
         else:
             raise Exception("Unknown filename type:  %s" % (which,))
+        if which not in ['frame']:
+            filename = os.path.join(self._model_save_info['path'], "%s%s" % (self._model_save_info['prefix'], filename))
 
+        return filename
+    
+    
+    
     def _save_training_image(self):
+        
         filename = self.get_filename('train-image')
-
-        # file_path = os.path.join(self._frame_dir, filename) if self._frame_dir is not None else filename
-        file_path = filename
         train_img = self._sim.image_train
-        cv2.imwrite(file_path, train_img[:, :, ::-1])
-        logging.info("Wrote training image:  %s" % (file_path,))
+        cv2.imwrite(filename, train_img[:, :, ::-1])
+        logging.info("Wrote training image:  %s" % (filename,))
 
-    def _train_thread(self, max_iter=0):
+    def _train_thread(self, max_iter=0, fast=False):
         # TF 2.x doesn't use sessions or graphs in eager
 
         # Print full model architecture
-        self._sim._model.summary()
+        if not fast:
+            self._sim._model.summary()
 
-        logging.info("Starting training:")
-        logging.info("\tBatch size: %i" % (self._sim.batch_size,))
-        logging.info("\tDiv types:  %s" % (self._get_arch_str(),))
-        logging.info("\tStructure units:  %i" % (self.n_structure,))
-        logging.info("\tColor units:  %i" % (self.n_hidden,))
-        logging.info("\tSharpness: %f" % (self._sim.sharpness,))
-        logging.info("\tGradient sharpness: %f" % (self._sim.grad_sharpness,))
+            logging.info("Starting training:")
+            logging.info("\tBatch size: %i" % (self._sim.batch_size,))
+            logging.info("\tDiv types:  %s" % (self._get_arch_str(),))
+            logging.info("\tStructure units:  %i" % (self.n_structure,))
+            logging.info("\tColor units:  %i" % (self.n_hidden,))
+            logging.info("\tSharpness: %f" % (self._sim.sharpness,))
+            logging.info("\tGradient sharpness: %f" % (self._sim.grad_sharpness,))
 
         self._cycle = self._sim.cycle  # in case resuming from a saved statese\\
         run_cycle = 0  # number of cycles since starting this run (not counting previous runs if resuming from a saved state)
@@ -821,12 +829,13 @@ class UIDisplay(object):
                          (self._run_cycles, self._epochs_per_cycle, self._run_cycles * self._epochs_per_cycle, self._cycle))
 
         # write frame before any training (may overwrite last frame if continuing a run).
-        self._output_image = self._gen_image()
-        logging.info("Generated output image of shape:  %s" % (self._output_image.shape,))       
-        self._save_training_image()
+        if not fast:
+            self._output_image = self._gen_image()
+            logging.info("Generated output image of shape:  %s" % (self._output_image.shape,))       
+            self._save_training_image()
+        
         # if we're continuing, don't store the new output image
-
-        if self._cycle == 0:
+        if self._cycle == 0 and not fast:            
             # Initial image, random weights, no training.  (Remove?)
             cur_loss = self._sim.get_loss()
             frame_name = self._write_frame(self._output_image)  # Create & save image
@@ -845,6 +854,7 @@ class UIDisplay(object):
                          (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
 
             new_losses = self._sim.train_more(self._epochs_per_cycle, learning_rate=self._learn_rate, verbose=self._verbose)
+            
             cur_loss = self._sim.get_loss()
             self._l_rate_history.append(self._learn_rate)
             self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss})
@@ -854,14 +864,12 @@ class UIDisplay(object):
 
 
             self._output_image = self._gen_image()
+            
             frame_name = self._write_frame(self._output_image)  # Create & save image
             self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss, 'filename': frame_name})
-            self._write_metadata()
-            filename = self.get_filename('model')
-            out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
-            self._sim.save_state(out_path)  # TODO:  Move after each cycle
-            logging.info("Saved model state to:  %s" % (out_path,))
-            
+            meta_filename = self._write_metadata()
+            model_filename = self.write_model()
+
             if self._shutdown:
                 break
             
@@ -884,7 +892,13 @@ class UIDisplay(object):
                          (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
         self.final_loss = cur_loss
         logging.info("Final loss after %i cycles:  %.6f" % (run_cycle, cur_loss))
-        return cur_loss
+        return cur_loss, meta_filename, model_filename
+    
+    def write_model(self):
+        filename = self.get_filename('model') 
+        self._sim.save_state(model_filename=filename, path='.')
+        logging.info("Wrote model to:  %s" % (filename,))
+        return filename
     
     def _gen_image(self, shape=None):
         if shape is None:
@@ -900,13 +914,14 @@ class UIDisplay(object):
 
     def _write_frame(self, img):
         out_path = None
-        
         if self._frame_dir is not None:
-            if not os.path.exists(self._frame_dir):
-                os.makedirs(self._frame_dir)
-                logging.info("Created frame directory:  %s" % (self._frame_dir,))
+            frame_dir = os.path.join(self._model_save_info['path'], self._frame_dir) 
+
+            if not os.path.exists(frame_dir):
+                os.makedirs(frame_dir)
+                logging.info("Created frame directory:  %s" % (frame_dir,))
             out_filename = self.get_filename('frame')
-            out_path = os.path.join(self._frame_dir, out_filename)
+            out_path = os.path.join(frame_dir, out_filename)
             if os.path.exists(out_path):
                 logging.warning("Output image %s already exists, overwriting!!!!" % (out_path,))
             cv2.imwrite(out_path, np.uint8(255 * img[:, :, ::-1]))
@@ -917,9 +932,7 @@ class UIDisplay(object):
         # # only if saving frames
         # if self._frame_dir is not None:
         # write metadata to same file, just overwrite:
-        meta_filename = self.get_filename('metadata')
-        meta_path = '.'
-        meta_file_path = os.path.join(meta_path, meta_filename)
+        meta_file_path = self.get_filename('metadata')
         metadata = {'frames': deepcopy(self._metadata),
                     'model_file': os.path.abspath(self.get_filename('model')),
                     'train_image_file': os.path.abspath(self.get_filename('train-image')),
@@ -929,6 +942,7 @@ class UIDisplay(object):
         with open(meta_file_path, 'w') as f:
             json.dump(metadata, f)
         logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
+        return meta_file_path
 
     def _start(self):
         
@@ -1276,12 +1290,7 @@ class UIDisplay(object):
         
         return self.final_loss, self._output_image
     
-    def save_model(self, filename):
-        self._sim.save_state(filename)
-        logging.info("Saved model to:  %s" % (filename,))
-        return filename
-
-
+    
 def get_args():
     logging.basicConfig(level=logging.INFO)
 
@@ -1374,6 +1383,6 @@ if __name__ == "__main__":
     print_args['_model_file'] = parsed.model_file
     print_args['_test_image'] = parsed.test_image
     pprint.pprint(print_args)
-    
-    s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file, **kwargs)
+
+    s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file,**kwargs)
     s.run()

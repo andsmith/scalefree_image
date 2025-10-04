@@ -127,7 +127,7 @@ class Experiment(object):
         var_param_values = self.var_param_values[0]
         
         n_cols = len(var_param_values)
-        fig, axs = plt.subplots(nrows=1, ncols=2, figsize=fig_size,gridspec_kw={'width_ratios': [1, 5]})
+        fig, axs = plt.subplots(nrows=1, ncols=2, gridspec_kw={'width_ratios': [1, 5]})
         
         # training image:
         axs[0].imshow(self.stats[0]['train_images'][0])

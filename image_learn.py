@@ -1174,6 +1174,7 @@ class UIDisplay(object):
             lrate_ax.set_title(lrate_title, fontsize=10)
             cmd = "Plotting division units (hit 'd' to hide)." if self._show_dividers else "(Hit 'd' to plot division units.)"
             out_unit_ax.set_title("Output image, model %s\n%s" % (div_units_str, cmd), fontsize=10)
+            
 
 
             # Update output image & draw divider units
@@ -1259,8 +1260,8 @@ class UIDisplay(object):
 
                 # Plot / update loss axis
                 
-                ex, ey = _make_flat_line_segments(epoch_means_x, epoch_means_x, epoch_means)
-                cx, cy = _make_flat_line_segments(cycle_means_x, cycle_means_x, cycle_means)
+                ex, ey = _make_flat_line_segments(epoch_means_x, epoch_means_x[1:] + [cyc_ind+1], epoch_means)
+                cx, cy = _make_flat_line_segments(cycle_means_x, np.concatenate((cycle_means_x[1:],[cyc_ind+1])), cycle_means)
                 if artists['loss'] is None:
                     artists['loss'] = {'minibatch_data': loss_ax.plot(minibatch_x, minibatch_losses, 'b.', label='Minibatch Loss')[0],
                                        'epoch_means': loss_ax.plot(ex, ey, 'r-', label='Epoch Means')[0],
@@ -1283,25 +1284,34 @@ class UIDisplay(object):
                 # For each learning rate / cycle pair we need to plot a horizontal line segment, so make the list twice as long
                 # and plot each y value twice, advancing x by 1 betweeen the first and second copy of each y value.
 
-                lrate_x, lrate_y = _make_flat_line_segments(lrate_x, np.array(lrate_x) + 1.0 / len(lrate_y), lrate_y)
+                lrate_x, lrate_y = _make_flat_line_segments(lrate_x, lrate_x[1:] + [cyc_ind+1], lrate_y)
                 if artists.get('lrate') is None:
                     artists['lrate'] = lrate_ax.plot(lrate_x, lrate_y, 'r-', label='Learning Rate')[0]
                     lrate_ax.set_yscale('log')
                 else:
                     artists['lrate'].set_data(lrate_x, lrate_y)
+                y_min, y_max = np.min(lrate_y)*.95, np.max(lrate_y)*1.05 
+                lrate_ax.set_ylim(y_min, y_max)
                 
-                anneal_temp_x, anneal_temp_y = np.array(anneal_temp_x), np.array(anneal_temp_y)
-                if artists.get('anneal') is None and anneal_history is not None:
-                    artists['anneal'] = anneal_ax.plot(anneal_temp_x, anneal_temp_y, label='Anneal Temp')[0]
-                    anneal_ax.set_yscale('log') 
-                elif artists.get('anneal') is not None and anneal_history is not None:
-                    artists['anneal'].set_data(anneal_temp_x, anneal_temp_y)
-                LPT.add_marker("anneal plot done")
+                if anneal_ax is not None:
+                    anneal_temp_x, anneal_temp_y = np.array(anneal_temp_x), np.array(anneal_temp_y)
+                    if artists.get('anneal') is None and anneal_history is not None:
+                        artists['anneal'] = anneal_ax.plot(anneal_temp_x, anneal_temp_y, label='Anneal Temp')[0]
+                        anneal_ax.set_yscale('log') 
+                    elif artists.get('anneal') is not None and anneal_history is not None:
+                        artists['anneal'].set_data(anneal_temp_x, anneal_temp_y)
+                    y_min, y_max = np.min(anneal_temp_y)*.95, np.max(anneal_temp_y)*1.05 
+                    anneal_ax.set_ylim(y_min, y_max)
                 
                 # set shared x limit
-                x_max = self._cycle + (self._cycle+1)/50 
-                x_min = -(self._cycle+1)/50
+                x_min, x_max = cycle_means_x[0], cycle_means_x[-1]
                 lrate_ax.set_xlim(x_min, x_max)
+                
+                #Set loss rate axis x ticks to integers only:
+                ticker = plt.MaxNLocator(integer=True)
+                loss_ax.xaxis.set_major_locator(ticker)
+                if anneal_ax is not None:
+                    anneal_ax.xaxis.set_major_locator(ticker)
                 LPT.add_marker("lrate plot done")
             self._update_plots = False
 
@@ -1316,11 +1326,8 @@ class UIDisplay(object):
                 LPT.add_marker("cleanup done")
 
             plt.draw()
-            LPT.add_marker("draw done")
             fig.canvas.flush_events()  # Force canvas to update
-            LPT.add_marker("flush done")
-            plt.pause(0.01)
-            LPT.add_marker("pause done")
+            plt.pause(0.1)
             # except Exception as e:
             #     logging.error(f"Error updating GUI: {e}")
             #     plt.pause(0.1)  # Longer pause on error

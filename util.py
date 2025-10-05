@@ -146,7 +146,7 @@ def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
     cv2.rectangle(image, (x0, y0), (x1, y1), color, thickness)
         
 
-def captioned_frame(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0),
+def captioned_image(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0),
                     justify='center', line_spacing=1.5, font_face=cv2.FONT_HERSHEY_SIMPLEX, **kwargs):
 
     caption_h = caption_height_px
@@ -238,11 +238,11 @@ def test_make_central_weights():
     plt.tight_layout()
     plt.show()
 
-def test_captioned_frame():
+def test_captioned_image():
     
     test_frame = cv2.imread('movies\\washington_linear_8d_10h_cycle-00000010.png')
     caption = ['This is a test caption', 'Second line of caption']
-    frame = captioned_frame(test_frame, caption, caption_height_px=50, line_spacing=2.0,caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(50,50,50))
+    frame = captioned_image(test_frame, caption, caption_height_px=50, line_spacing=2.0,caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(50,50,50))
 
     cv2.imshow("Test Captioned Frame", frame)
     cv2.waitKey(0)
@@ -251,7 +251,7 @@ def test_captioned_frame():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    #test_captioned_frame()
+    #test_captioned_image()
     # test_add_text()
     # test_make_input_grid()
     test_make_central_weights()

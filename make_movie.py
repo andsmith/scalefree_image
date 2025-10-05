@@ -31,7 +31,7 @@ import argparse
 import json
 from tempfile import tempdir
 from turtle import pos
-from util import add_text, captioned_frame
+from util import add_text, captioned_image
 import cv2
 import tempfile
 import shutil
@@ -195,7 +195,7 @@ still_life = {'frame_rate': 30,
               'episodes': [
                   {'json_meta': r'still_life_metadata_50c-100l_32h.json',
                    'caption': [{'txt': 'cycle (50 epochs): %d, learning rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
-                               {'txt': 'output %i x %i, loss: %.7f', 'meta_keys': ['train_width', 'train_height', 'loss']}]}
+                               {'txt': 'loss: %.7f', 'meta_keys': ['loss']}]}
               ]
               }
 author = {'frame_rate': 60,
@@ -242,6 +242,51 @@ episode_template = {'frame_rate': 20,
               ]
               }
 
+class Frame(object):
+
+    _DEFAULT_HOTKEY_JUMPS = {
+        '0': {'name': 'title', 'index': 0},   # skip to title frame & play
+        'g': {'name': 'motion', 'frame_type_name': 'motion'}   # skip to the "good part", the first moving sequence
+    }
+    
+    def __init__(self, image, index, type_name=None, hotkey_jumps=None):
+        self.index = index
+        self.type_name = type_name
+        self.hotkey_jumps = Frame._DEFAULT_HOTKEY_JUMPS.copy() 
+        self.hotkey_jumps.update(hotkey_jumps or {})
+        self.set_image(image)
+
+    def set_image(self, image):
+        self.image = image
+        self.width = image.shape[1]
+        self.height = image.shape[0]
+
+    def check_size(self, size_wh):
+        """
+        If self.image is the wrong size, fix it and issue a warning.
+        """
+        if (self.image.shape[1], self.image.shape[0]) != size_wh:
+            logging.warning("Frame %d size mismatch:  %s should be %s, resizing..." %
+                            (self.index, (self.image.shape[1], self.image.shape[0]), size_wh))
+            self.image = cv2.resize(self.image, size_wh, interpolation=cv2.INTER_AREA)
+            
+    def mk_seq(self, n_frames, start_ind=0, type_name='still'):
+        return [Frame(self.image, start_ind + i, type_name, self.hotkey_jumps) for i in range(n_frames)]
+
+    @staticmethod
+    def resequence(start=0, frame_lists=()):
+        """
+        Given lists of frame sequences, reindex them starting from 'start'.
+        """
+        frames = []
+        index = start
+        for flist in frame_lists:
+            for f in flist:
+                f.index = index
+                frames.append(f)
+                index += 1
+        return frames
+
 
 class MovieMaker(object):
     def __init__(self, movie_data, output_file, preview=False, frame_rate=None):
@@ -272,7 +317,7 @@ class MovieMaker(object):
         self._max_frame_cap_font_scale = self.movie_data.get('max_frame_cap_font_scale', 1.0)
         # self.episodes = self._load()
 
-    def make_train_frame(self, size_wh):
+    def make_train_frame(self, size_wh, start_index=0):
         if self.train_img is None:
             raise ValueError("No training image provided in movie data.")
         train_img = self.train_img[:, :, ::-1]
@@ -284,11 +329,12 @@ class MovieMaker(object):
             logging.warning(f"Resizing training image from ({train_img.shape[1]}, {train_img.shape[0]}) to {size_wh}")
             train_img = cv2.resize(train_img, size_wh, interpolation=cv2.INTER_AREA)
         captions = [caption_top] + self.movie_data['train_img']['caption'][1:]
-        frame = captioned_frame(train_img, captions, self.caption_height_px, self.caption_pad_xy, max_font_scale=self._max_frame_cap_font_scale,
+        img = captioned_image(train_img, captions, self.caption_height_px, self.caption_pad_xy, max_font_scale=self._max_frame_cap_font_scale,
                                 txt_color=self.txt_color, bkg_color=self.bkg_color, font_face=cv2.FONT_HERSHEY_COMPLEX, line_spacing=1.5)
+        frame = Frame(img, start_index, 'train')
         return frame
 
-    def make_title_frame(self, size_wh, spacing_frac=0.0, max_font_scales=(None, None, None)):
+    def make_title_frame_img(self, size_wh, spacing_frac=0.0, max_font_scales=(None, None, None)):
         """
         +-------------------+
         |   title line 1    |
@@ -331,21 +377,27 @@ class MovieMaker(object):
         sub2_bbox = {'x': (pad_px, pad_px+text_width),
                      'y': (y_top, y_top + box_heights[2])}
 
-        frame = np.zeros((size_wh[1], size_wh[0], 3), dtype=np.uint8)
-        frame[:, :] = self.bkg_color
+        img = np.zeros((size_wh[1], size_wh[0], 3), dtype=np.uint8)
+        img[:, :] = self.bkg_color
         kwargs = {} if max_font_scales[0] is None else {'max_font_scale': max_font_scales[0]}
-        add_text(frame, self.title_txt['main'], main_bbox, font_face=cv2.FONT_HERSHEY_DUPLEX,
+        add_text(img, self.title_txt['main'], main_bbox, font_face=cv2.FONT_HERSHEY_DUPLEX,
                  justify='left', color=self.txt_color, line_spacing=1.5, **kwargs)
 
         if len(self.title_txt['sub1']) > 0:
             kwargs = {} if max_font_scales[1] is None else {'max_font_scale': max_font_scales[1]}
-            add_text(frame, self.title_txt['sub1'], sub1_bbox, line_spacing=1.5,
+            add_text(img, self.title_txt['sub1'], sub1_bbox, line_spacing=1.5,
                      font_face=cv2.FONT_HERSHEY_COMPLEX, justify='left', color=self.txt_color, **kwargs)
         if len(self.title_txt['sub2']) > 0:
             kwargs = {} if max_font_scales[2] is None else {'max_font_scale': max_font_scales[2]}
-            add_text(frame, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
+            add_text(img, self.title_txt['sub2'], sub2_bbox, font_face=cv2.FONT_HERSHEY_SIMPLEX,
                      justify='left', line_spacing=1.5, color=self.txt_color, **kwargs)
+        return img
+    
+    def make_title_frame(self,start_ind=0, *args, **kwargs):
+        img = self.make_title_frame_img(*args, **kwargs)
+        frame = Frame(img, start_ind, 'title')
         return frame
+    
 
     def run(self):
         frames = self._make_frame_sequence()
@@ -354,16 +406,13 @@ class MovieMaker(object):
                 logging.info("Restarting preview, hit 'q' or ESC in the preview window to exit.")
         if self.output_file is not None:
             # Check all frames are the same size
-            frame_size = frames[0].shape[1], frames[0].shape[0]
-            for f_i, f in enumerate(frames):
-                
-                if (f.shape[1], f.shape[0]) != frame_size:
-                    logging.warning("Frame size mismatch:  %s should be %s, resizing..." %
-                                    ((f.shape[1], f.shape[0]), frame_size))
-                    frames[f_i] = cv2.resize(f, frame_size, interpolation=cv2.INTER_AREA)
+            frame_size = frames[0].image.shape[1], frames[0].image.shape[0]
+            for f in frames:
+                f.check_size(frame_size)
+
             self._write_movie(frames)
 
-    def _preview(self, frames):
+    def _preview(self, frame_list):
         t0 = time.perf_counter()
         last_time = t0 - 10.0
         n_frames = 0
@@ -375,9 +424,9 @@ class MovieMaker(object):
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         win_size = None
         frame_index = 0
-        while frame_index < len(frames):
+        while frame_index < len(frame_list):
             i = frame_index
-            frame = frames[i]
+            frame = frame_list[i].image
             now = time.perf_counter()
             delay = now - last_time
             sleep_time = max_delay - delay
@@ -458,7 +507,7 @@ class MovieMaker(object):
 
 
     def _load_episode_frames(self, episode):
-        frames = []
+        frames = []  # Frame objects
         if 'input_pattern' in episode:
             files = glob.glob(episode['input_pattern'])
             if not files:
@@ -484,15 +533,9 @@ class MovieMaker(object):
             img = cv2.imread(f)
             if img is None:
                 raise ValueError(f"Failed to read image file for frame {f_i}:  {f}")
-            frames.append(img)
+            frames.append(Frame(img, f_i, type_name='motion'))
 
-        if meta is not None:
-            # Some keys need to be extracted from the frames, get those now
-            for m, f in zip(meta, frames):
-                m['train_width'] = f.shape[1]
-                m['train_height'] = f.shape[0]
-
-        if not frames:
+        if len(frames) == 0:
             raise ValueError(f"No valid image files found for episode with pattern:  {episode['input_pattern']}")
         logging.info(f"Loaded {len(frames)} frames for episode.")
         return frames, meta
@@ -518,30 +561,35 @@ class MovieMaker(object):
             lines.append(line)
         return lines
 
-    def _make_episode_seq(self, episode):
+    def _make_episode_frames(self, episode):
         frames, meta = self._load_episode_frames(episode)
         if meta is None:
             frame_captions = [episode['caption']] * len(frames)
         else:
             # Need to make custom captions from the metadata for each frame
             frame_captions = [self._make_frame_caption(m, episode['caption']) for m in meta]
+        for f_ind, (f, c) in enumerate(zip(frames, frame_captions)):
+            frame_img_w_cap = captioned_image(f.image, c, self.caption_height_px, self.caption_pad_xy, justify='left', max_font_scale=self._max_frame_cap_font_scale,
+                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.0)
+            frames[f_ind].set_image(frame_img_w_cap)
 
-        frames = [captioned_frame(f, c, self.caption_height_px, self.caption_pad_xy, justify='left', max_font_scale=self._max_frame_cap_font_scale,
-                                  txt_color=self.txt_color, bkg_color=self.bkg_color, line_spacing=1.0) for f, c in zip(frames, frame_captions)]
-
-        intro_frames = self._mk_seq(frames[0], self.initial_pause_sec)
-        outro_frames = self._mk_seq(frames[-1], self.final_pause_sec)
-        frames = intro_frames + frames + outro_frames
+        intro_frames = frames[0].mk_seq(self._get_n_frames(self.initial_pause_sec), 0, 'still_intro')
+        outro_frames = frames[-1].mk_seq(self._get_n_frames(self.final_pause_sec), 0, 'still_outro')
+        frames = Frame.resequence(start=0, frame_lists = [intro_frames, frames, outro_frames])
 
         return frames
-
+    
+    def _get_n_frames(self, duration_sec, min_frames=1):
+        return max(min_frames, int(round(duration_sec * self.frame_rate)))
+    
     def _make_frame_sequence(self):
-        episode_sequences = [self._make_episode_seq(ep) for ep in self.episode_data]
-        frame_size_wh = episode_sequences[0][0].shape[:2][::-1]
+        # import ipdb; ipdb.set_trace()
+        ep_frame_seqs = [self._make_episode_frames(ep) for ep in self.episode_data]
+        frame_size_wh = ep_frame_seqs[0][0].width, ep_frame_seqs[0][0].height
         img_size = (frame_size_wh[0], frame_size_wh[1]-self.caption_height_px)
         logging.info("Got image/frame size from first episode's first frame:  %s / %s" % (img_size, frame_size_wh))
 
-        frames = []
+        frame_seqs = []
 
         #  Add title if it exists
         if self.title_txt is not None:
@@ -549,31 +597,28 @@ class MovieMaker(object):
                                                 spacing_frac=self._title_spacing_frac,
                                                 max_font_scales=self._max_title_font_scales)  
 
-            frames += self._mk_seq(title_frame, self.title_dur_sec,)
+            frame_seqs.append(title_frame.mk_seq(self._get_n_frames(self.title_dur_sec), 0, 'title'))
+        
 
         # Add training image if it exists, create a short version for after/between episodes
         short_train_seq = []
         if self.train_img is not None:
-            train_frame = self.make_train_frame(img_size)
-            train_seq = self._mk_seq(train_frame, self.movie_data['train_img']['duration_sec'])
-            short_train_seq = self._mk_seq(
-                train_frame,  self.movie_data['train_img'].get('inter-episode_pause_sec', 2.0))
-            frames += train_seq
+            train_frame = self.make_train_frame(img_size, start_index=0)
+            train_seq = train_frame.mk_seq(self._get_n_frames(self.movie_data['train_img']['duration_sec']), 0, 'train')
+            short_train_seq = train_frame.mk_seq(self._get_n_frames(self.movie_data['train_img'].get('inter-episode_pause_sec', 2.0)), 0, 'train')
+            frame_seqs.append(train_seq)
             logging.info("Added training image sequence of %d frames." % (len(train_seq),))
         # Now add each episode sequence, with a short training image pause between
-        for seq_no, seq in enumerate(episode_sequences):
-            frames += seq + short_train_seq  # (short_train_seq if (seq_no < len(episode_sequences)-1) else [])
-        return frames
+        for seq_no, seq in enumerate(ep_frame_seqs):
+            frame_seqs.extend([seq, short_train_seq])  # (short_train_seq if (seq_no < len(episode_sequences)-1) else [])
+        return Frame.resequence(start=0, frame_lists=frame_seqs)
 
-    def _mk_seq(self, frame, dur_sec):
-        n_frames = int(dur_sec * self.frame_rate)
-        return [frame] * n_frames
-
-    def _write_movie(self, frames):
-        if not frames:
+    def _write_movie(self, frame_seq):
+        if not frame_seq:
             logging.error("No frames to write")
             return
-
+        frames = [f.image for f in frame_seq]
+        logging.info(f"Writing movie to {self.output_file}, total frames: {len(frames)}, frame rate: {self.frame_rate} fps")
         # Get frame dimensions from first frame and ensure they're consistent
         first_frame = frames[0]
         height, width, channels = first_frame.shape
@@ -777,11 +822,11 @@ if __name__ == "__main__":
             title_frame = movie_maker.make_title_frame((800, 600),
                                                     movie_data['title']['spacing_frac'],
                                                     max_font_scales=movie_data['title']['max_font_scales'])
-            cv2.imwrite('example_title.png', title_frame[:, :, ::-1])
+            cv2.imwrite('example_title.png', title_frame.image[:, :, ::-1])
             logging.info("No output mp4 file provided, wrote title frame to: example_title.png")
         if movie_data['train_img'] is not None:
             train_frame = movie_maker.make_train_frame((800, 600))
-            cv2.imwrite('example_train.png', train_frame[:, :, ::-1])
+            cv2.imwrite('example_train.png', train_frame.image[:, :, ::-1])
             logging.info("Wrote training image frame to: example_train.png")
         sys.exit(0)
 

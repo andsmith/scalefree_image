@@ -237,23 +237,16 @@ episode_template = {'frame_rate': 20,
                                 'inter-episode_pause_sec': 3.0},
               'episodes': [
                   {'json_meta': None, # will be command line argument
-                   'caption': [{'txt': 'frame: %d, L-rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
-                               {'txt': 'loss: %.7f', 'meta_keys': [ 'current_loss']}]}
+                   'caption': [{'txt': 'Cycle: %d, Learning Rate: %.5f', 'meta_keys': ['cycle', 'learning_rate']},
+                               {'txt': 'Loss: %.7f', 'meta_keys': [ 'current_loss']}]}
               ]
               }
 
 class Frame(object):
-
-    _DEFAULT_HOTKEY_JUMPS = {
-        '0': {'name': 'title', 'index': 0},   # skip to title frame & play
-        'g': {'name': 'motion', 'frame_type_name': 'motion'}   # skip to the "good part", the first moving sequence
-    }
     
-    def __init__(self, image, index, type_name=None, hotkey_jumps=None):
+    def __init__(self, image, index, type_name=None):
         self.index = index
         self.type_name = type_name
-        self.hotkey_jumps = Frame._DEFAULT_HOTKEY_JUMPS.copy() 
-        self.hotkey_jumps.update(hotkey_jumps or {})
         self.set_image(image)
 
     def set_image(self, image):
@@ -271,7 +264,7 @@ class Frame(object):
             self.image = cv2.resize(self.image, size_wh, interpolation=cv2.INTER_AREA)
             
     def mk_seq(self, n_frames, start_ind=0, type_name='still'):
-        return [Frame(self.image, start_ind + i, type_name, self.hotkey_jumps) for i in range(n_frames)]
+        return [Frame(self.image, start_ind + i, type_name) for i in range(n_frames)]
 
     @staticmethod
     def resequence(start=0, frame_lists=()):
@@ -289,10 +282,21 @@ class Frame(object):
 
 
 class MovieMaker(object):
-    def __init__(self, movie_data, output_file, preview=False, frame_rate=None):
+
+    _PREVIEW_HOTKEYS = {
+        '0': {'name': 'title', 'index': 0},   # skip to title frame & play
+        'g': {'name': 'motion', 'frame_type_name': 'motion'}   # skip to the "good part", the first moving sequence
+    }
+    
+    def __init__(self, movie_data, output_file, preview=False, frame_rate=None, hotkeys=None):
         self.movie_data = movie_data
         self.output_file = output_file
         self.preview = preview
+        self._preview_frame_index = 0 # set this to change playback position in preview mode
+        self._preview_paused = False  # set this to pause/start preview playback
+        self.hotkeys = MovieMaker._PREVIEW_HOTKEYS.copy() 
+        self.hotkeys.update(hotkeys or {})
+
         if 'train_img' in self.movie_data:
             self.train_img = cv2.imread(self.movie_data['train_img']['file'])[:, :, ::-1]
             logging.info("Loaded training image of shape:  %s" % (self.train_img.shape,))
@@ -419,13 +423,13 @@ class MovieMaker(object):
         max_delay = 1.0 / self.frame_rate
         sleep_times = []
         user_quit = False
-        paused=False
+        self._preview_paused = False
         win_name = 'preview'
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         win_size = None
-        frame_index = 0
-        while frame_index < len(frame_list):
-            i = frame_index
+        self._preview_frame_index = 0
+        while self._preview_frame_index < len(frame_list):
+            i = self._preview_frame_index
             frame = frame_list[i].image
             now = time.perf_counter()
             delay = now - last_time
@@ -443,33 +447,27 @@ class MovieMaker(object):
                     win_size = (int(frame.shape[1]*mul), int(frame.shape[0]*mul))
                     cv2.resizeWindow(win_name, win_size[0], win_size[1])
 
-            if paused: 
-                
-                p_frame = self._add_pause_note(frame)
-            else:
-                p_frame = frame
-                
-            cv2.imshow(win_name, p_frame)
+            if self._preview_paused: 
+                frame = self._add_pause_note(frame)
+
+            cv2.imshow(win_name, frame)
+            key = cv2.waitKey(1)
+            if self._keypress(key, frame_list):
+                user_quit = True
+                break
+            
+            # Timing:
             n_frames += 1
             last_time = time.perf_counter()
-
             if n_frames % 30 == 0:
                 elapsed = now - t0
                 actual_fps = n_frames / elapsed if elapsed > 0 else 0
                 logging.info(f"Preview frame {i}, actual fps: {actual_fps:.2f}")
                 t0 = now
                 n_frames = 0
-
-            key = cv2.waitKey(1)
-            if key == 27 or key == ord('q'):
-                user_quit = True
-                break
-            elif key==' ' or key==ord('p'):
-                logging.info("Paused. Hit space or 'p' to resume, 'q' or ESC to exit.")
-                paused = not paused
                 
-            if not paused:
-                frame_index += 1
+            if not self._preview_paused:
+                self._preview_frame_index += 1
                 
                 
         if user_quit:
@@ -477,6 +475,32 @@ class MovieMaker(object):
             cv2.destroyAllWindows()
             return True
         return False
+
+    def _keypress(self, key, frame_list):
+
+        if key == 27 or key == ord('q'):
+            return True
+        elif key==' ' or key==ord('p'):
+            logging.info("Paused. Hit space or 'p' to resume, 'q' or ESC to exit.")
+            self._preview_paused = not self._preview_paused
+        else:
+            for hk, hk_info in self.hotkeys.items():
+                if ord(hk) == key:
+                    index = self._get_jump_pos(hk_info, frame_list)
+                    if index is None:
+                        logging.warning(f"Hotkey '{chr(key)}' requested skip to frame type '{hk['frame_type_name']}', but no such frame type found.")       
+                    else:
+                        self._preview_frame_index = index
+        return False
+    
+    def _get_jump_pos(self, hk_info, frame_list):
+        if 'index' in hk_info:
+            return hk_info['index']
+        elif 'frame_type_name' in hk_info:
+            for i, f in enumerate(frame_list):
+                if f.type_name == hk_info['frame_type_name']:
+                    return i
+        return None
     
     def _add_pause_note(self, frame, margin = 0.10):
         pad_px = max(min(int(margin * frame.shape[1]), int(margin * frame.shape[0])), 5)

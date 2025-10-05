@@ -618,6 +618,7 @@ class ScaleInvariantImage(object):
         
         with open(model_filename, 'wb') as outfile:
             cp.dump(data, outfile, protocol=cp.HIGHEST_PROTOCOL)
+        return model_filename
 
     @staticmethod
     def _load_state(model_filepath):
@@ -729,6 +730,8 @@ class UIDisplay(object):
         # Check for metadata file
         if state_file is not None:
             meta_filename = self.get_filename('metadata')
+            if self._frame_dir is not None:
+                meta_filename = os.path.join(self._frame_dir, meta_filename)
             if os.path.exists(meta_filename):
                 with open(meta_filename, 'r') as f:
                     metadata = json.load(f)
@@ -824,12 +827,14 @@ class UIDisplay(object):
 
     def _save_training_image(self):
         filename = self.get_filename('train-image')
-
-        # file_path = os.path.join(self._frame_dir, filename) if self._frame_dir is not None else filename
-        file_path = filename
+        if self._frame_dir is not None:
+            file_path = os.path.join(self._frame_dir, filename)
+        else:
+            file_path = filename
         train_img = self._sim.image_train
         cv2.imwrite(file_path, train_img[:, :, ::-1])
         logging.info("Wrote training image:  %s" % (file_path,))
+        return file_path
 
     def _train_thread(self, max_iter=-1):
         # TF 2.x doesn't use sessions or graphs in eager
@@ -854,12 +859,14 @@ class UIDisplay(object):
 
         # write frame before any training (may overwrite last frame if continuing a run).
         self._output_image = self._gen_image()
-        logging.info("Generated output image of shape:  %s" % (self._output_image.shape,))       
-        self._save_training_image()
+        logging.info("Generated output image of shape:  %s" % (self._output_image.shape,))
+        self._train_img_filename = self._save_training_image()
         # if we're continuing, don't store the new output image
         
-        ### DEBUG TEMP
-        cv2.imwrite("DEBUG_initial_image.png", (self._output_image * 255).astype(np.uint8)[:, :, ::-1])
+        self._model_state_path = None  # saved after first training cycle
+        
+        # ### DEBUG TEMP
+        # cv2.imwrite("DEBUG_initial_image.png", (self._output_image * 255).astype(np.uint8)[:, :, ::-1])
 
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
@@ -922,8 +929,8 @@ class UIDisplay(object):
             self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss_uw, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
-            out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
-            self._sim.save_state(out_path)  # TODO:  Move after each cycle
+            out_path = filename if self._frame_dir is None else os.path.join(self._frame_dir, filename)
+            self._model_state_path = self._sim.save_state(out_path)  # TODO:  Move after each cycle
             logging.info("Saved model state to:  %s" % (out_path,))
             
             if self._shutdown:
@@ -954,6 +961,10 @@ class UIDisplay(object):
         if shape is None:
             train_shape = self._sim.image_train.shape
             shape = (np.array(train_shape[:2]) * self._display_multiplier).astype(int)
+            if shape[0] % 2 == 1:
+                shape = (shape[0]+1, shape[1])
+            if shape[1] % 2 == 1:
+                shape = (shape[0], shape[1]+1)
         img = self._sim.gen_image(output_shape=shape, border=self._border, **self.div_render_params)
         return img
 
@@ -982,11 +993,11 @@ class UIDisplay(object):
         # if self._frame_dir is not None:
         # write metadata to same file, just overwrite:
         meta_filename = self.get_filename('metadata')
-        meta_path = '.'
+        meta_path = '.' if self._frame_dir is None else self._frame_dir
         meta_file_path = os.path.join(meta_path, meta_filename)
         metadata = {'frames': deepcopy(self._metadata),
-                    'model_file': os.path.abspath(self.get_filename('model')),
-                    'train_image_file': os.path.abspath(self.get_filename('train-image')),
+                    'model_file': self._model_state_path,
+                    'train_image_file': self._train_img_filename,
                     'train_downscale': self._downscale,
                     'loss_history': self._loss_history,
                     'learning_rate_history': self._l_rate_history,

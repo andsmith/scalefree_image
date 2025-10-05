@@ -42,7 +42,7 @@ class ScaleInvariantImage(object):
     """
 
     def __init__(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
-                 learning_rate_initial=0.1, downscale=1.0, center_weight_params=None, line_params=3, **kwargs):
+                 learning_rate_initial=1.0, downscale=1.0, center_weight_params=None, line_params=3, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
         :param n_hidden: number of hidden units in the middle
@@ -252,7 +252,7 @@ class ScaleInvariantImage(object):
              y_lim = (-1/aspect_ratio, 1/aspect_ratio)
         else:
              x_lim = (-aspect_ratio, aspect_ratio)
-             y_lim = (-1.0/aspect_ratio-margin, 1.0/aspect_ratio+margin)
+             y_lim = (-1.0, 1.0)
              
         # Base image for plotting (reuse artist to avoid accumulation)
         if output_image is not None:
@@ -269,10 +269,14 @@ class ScaleInvariantImage(object):
             return
 
         image_extent = [x_lim[0], x_lim[1], y_lim[0], y_lim[1]]
+        ax.set_anchor('C')
         if self._artists['output_image'] is None:
-            
-            #print("\n\n\n SHOW OUTPUT IMAGE:  %s \n\n\n" % (img_to_show.shape,))
-            self._artists['output_image'] = ax.imshow(img_to_show, extent=image_extent)
+            self._artists['output_image'] = ax.imshow(
+                img_to_show,
+                extent=image_extent,
+                origin='upper',
+                aspect='auto'
+            )
         else:
             self._artists['output_image'].set_data(img_to_show)
             self._artists['output_image'].set_extent(image_extent)
@@ -307,6 +311,7 @@ class ScaleInvariantImage(object):
             for curve in self._artists['circular']['curves']:
                 curve.set_visible(True)
         
+        ax.invert_yaxis()
         if 'linear' in params:
             if 'centers' in params['linear']:
                 centers = params['linear']['centers'].reshape(-1,2)  # switch to (x,y)
@@ -662,7 +667,7 @@ class UIDisplay(object):
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
-                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=0.1, learning_rate_final=None, nogui=False, 
+                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=1.0, learning_rate_final=None, nogui=False, 
                  synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, **kwargs):
         self._verbose = verbose
         self._border = border
@@ -692,7 +697,7 @@ class UIDisplay(object):
         self._nogui = nogui
         self._metadata = []
         self.final_loss = None
-        self._show_dividers = False
+        self._show_dividers = True
         self._ui_flags = {n:False for n in range(10)}  # for keypress toggles
         self.div_render_params = div_render_params if div_render_params is not None else {}
         self._anneal = anneal_args
@@ -1115,14 +1120,14 @@ class UIDisplay(object):
         #out_unit_ax.axis("off")
         # turn off x ticks, ylabel & ticks for out_unit_ax
         out_unit_ax.tick_params(labeltop=False, labelbottom=False)
-        out_unit_ax.set_ylabel("")
-        out_unit_ax.set_xticks([])
-        out_unit_ax.set_yticks([])
-
-        loss_ax.set_xlabel("Cycle (%i epochs)" % (self._epochs_per_cycle,))
+        # out_unit_ax.set_ylabel("")
+        # out_unit_ax.set_xticks([])
+        # out_unit_ax.set_yticks([])
+        cmd = "hit 'a' to show last 5 cycles only." if self._show_all_history else "Hit 'a' to show all cycles."
+        loss_ax.set_xlabel("Cycle (%i epochs) - %s" % (self._epochs_per_cycle, cmd))
         loss_ax.set_ylabel("Loss")
-        cmd = "('a' to show last 5 cycles only)" if self._show_all_history else "('a' to show all cycles)"
-        loss_ax.set_title("Loss history, %i cycles total\n%s" % (len(self._loss_history), cmd), fontsize=10)
+
+        loss_ax.set_title("Loss history, %i cycles total" % (len(self._loss_history),), fontsize=10)
         if anneal_ax is not None:
             anneal_ax.grid(which='major', axis='both')
             anneal_ax.set_ylabel("Temp", fontsize=8)
@@ -1166,8 +1171,16 @@ class UIDisplay(object):
                     img_out[contour[:, 0], contour[:, 1], :] = colors[level_ind]
             logging.info("Overlayed weight contours on training image.")
         artists['train_img'] = train_ax.imshow(img_out)
-        #print("\n\n\n SHOW TRAINING IMAGE:  %s \n\n\n" % (img_out.shape,))
-        
+        train_ax.set_anchor('C')
+
+        train_h, train_w = self._sim.image_train.shape[:2]
+        box_aspect = (train_h / float(train_w)) if train_w else 1.0
+        if hasattr(train_ax, "set_box_aspect"):
+            train_ax.set_box_aspect(box_aspect)
+            out_unit_ax.set_box_aspect(box_aspect)
+        else:
+            train_ax.set_aspect(box_aspect, adjustable='box')
+            out_unit_ax.set_aspect(box_aspect, adjustable='box')
         LPT.reset(enable=False, burn_in=4, display_after=100,save_filename = "loop_timing_log.txt")
         plt.tight_layout()
         tl_times=[]
@@ -1181,12 +1194,14 @@ class UIDisplay(object):
             train_ax.set_title("Training cycle %i/%s, target image %i x %i%s" %
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
                     self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
-            cmd = "('a' to show last 5 cycles only)" if self._show_all_history else "('a' to show all cycles)"
-            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)\n%s" % (  self._batch_size, cmd), fontsize=12)
+            
+            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)" % (  self._batch_size), fontsize=12)
             if anneal_ax is not None:
                 anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=12)
             lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
             lrate_ax.set_title(lrate_title, fontsize=12)
+            cmd = "hit 'a' to show last 5 cycles only." if self._show_all_history else "Hit 'a' to show all cycles."
+            loss_ax.set_xlabel("Cycle (%i epochs) - %s" % (self._epochs_per_cycle, cmd))
 
             cmd = "(Hit 'd' to hide division units.)" if self._show_dividers else "(Hit 'd' to plot division units.)"
             out_unit_ax.set_title("Output image %s" % (cmd,), fontsize=12)
@@ -1322,22 +1337,23 @@ class UIDisplay(object):
                     anneal_temp_x, anneal_temp_y = np.array(anneal_temp_x), np.array(anneal_temp_y)
                     if artists.get('anneal') is None and anneal_history is not None:
                         artists['anneal'] = anneal_ax.plot(anneal_temp_x, anneal_temp_y, label='Anneal Temp')[0]
-                        anneal_ax.set_yscale('log') 
                     elif artists.get('anneal') is not None and anneal_history is not None:
                         artists['anneal'].set_data(anneal_temp_x, anneal_temp_y)
-                    y_min, y_max = np.min(anneal_temp_y)*.95, np.max(anneal_temp_y)*1.05 
+                    anneal_range = np.max(anneal_temp_y) - np.min(anneal_temp_y)
+                    y_min, y_max = (np.min(anneal_temp_y)-anneal_range*.05, 
+                        np.max(anneal_temp_y) + anneal_range*.05)  
                     anneal_ax.set_ylim(y_min, y_max)
                 
                 # set shared x limit
                 x_min, x_max = cycle_means_x[0], cycle_means_x[-1]
                 lrate_ax.set_xlim(x_min, x_max)
-                
-                #Set loss rate axis x ticks to integers only:
-                ticker = plt.MaxNLocator(integer=True)
-                loss_ax.xaxis.set_major_locator(ticker)
-                if anneal_ax is not None:
-                    anneal_ax.xaxis.set_major_locator(ticker)
-                LPT.add_marker("lrate plot done")
+            
+            #Set loss rate axis x ticks to integers only:
+            ticker = plt.MaxNLocator(integer=True)
+            loss_ax.xaxis.set_major_locator(ticker)
+            if anneal_ax is not None:
+                anneal_ax.xaxis.set_major_locator(ticker)
+
             self._update_plots = False
 
             # Periodic cleanup to prevent matplotlib memory accumulation
@@ -1361,7 +1377,7 @@ class UIDisplay(object):
 
             plt.draw()
             fig.canvas.flush_events()  # Force canvas to update
-            plt.pause(0.1)
+            plt.pause(0.2 )
             # except Exception as e:
             #     logging.error(f"Error updating GUI: {e}")
             #     plt.pause(0.1)  # Longer pause on error
@@ -1461,8 +1477,29 @@ def get_args():
     return parsed, kwargs
 
 
+def test_vertical():
+    
+    lines = {'centers': np.array([[0.0, 0.2], [0.0, -0.2]]),
+             'angles': np.array([0, 1])}
+    tim = TestImageMaker(image_size_wh=(20,36))
+    test_image = tim.make_image('spec_image', lines = lines, is_color=False)
+    image_filename = "test_vertical.png"
+    cv2.imwrite(image_filename, np.uint8(255*test_image))
+    n_div = {'linear': 2, 'circular': 0, 'sigmoid': 0}
+
+    kwargs = {'image_file': image_filename, 'n_hidden': 4, 'n_structure': 0, 'n_div': n_div, 'nogui': False, 'learning_rate': 20.0,
+              'learning_rate_final': 0.1,
+              'epochs_per_cycle': 10, 'run_cycles': 10, 'display_multiplier': 10}
+    s = UIDisplay(**kwargs)
+    loss = s.run()
+    print("Final loss:  %.6f" % (loss,)) 
+
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    # test_vertical()
+    # sys.exit()
     parsed, kwargs = get_args()
 
     if parsed.input_image is None and parsed.model_file is None and parsed.test_image is None:

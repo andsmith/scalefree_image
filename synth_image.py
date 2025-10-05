@@ -124,7 +124,7 @@ class TestImageMaker(object):
         mask = self._make_line_mask(angle, center)
         return self._mask_to_image_gray(mask)
 
-    def _synth_bw_line_static(self):
+    def _synth_static_line_bw(self):
         angle = np.pi/2 -np.pi/16# np.random.uniform(0, np.pi/8)
         center = np.array([0.5, 0.0])
         mask = self._make_line_mask(angle, center)
@@ -282,6 +282,34 @@ class TestImageMaker(object):
     def _synth_mix_D_64_rand(self):
         return self._help_mix_n_rand(n_each=64, cmap_name='flag')
     
+    def _synth_spec_image(self, lines=None, circles=None, is_color=False):
+        """
+        Create an image with the specified lines and circles.
+        :param lines: dict(centers: N x 2 x,y centers,
+                            angles: N angles in radians)
+        :param circles: dict(centers: N x 2 x,y centers,
+                             radii: N radii)
+        :param is_color: bool, whether to create a color image
+        """
+        combined_mask = np.zeros((self._wh[1], self._wh[0]), dtype=np.float64)
+        mantissa = 2. if (lines is not None and circles is not None and
+                          (len(lines['centers']) + len(circles['centers'])) < 20) else 1.5
+        if lines is not None:
+            for i, (angle, center) in enumerate(zip(lines['angles'], lines['centers'])):
+                mask = self._make_line_mask(angle, center).astype(np.float64)
+                combined_mask = combined_mask + mask * mantissa ** i
+        if circles is not None:
+            offset = len(lines['centers']) if lines is not None else 0
+            for i, (center, radius) in enumerate(zip(circles['centers'], circles['radii'])):
+                mask = self._make_circle_mask(center, radius, center_size=0).astype(np.float64)
+                combined_mask = combined_mask + mask * mantissa ** (i + offset)
+        if is_color:
+            return self._mask_to_image_color(combined_mask,cmap_name='nipy_spectral')
+        else:
+            return self._mask_to_image_gray(combined_mask)
+        
+        
+    
     def _func_prefix(self, func_name):
         func = getattr(self, func_name)
         return func.__name__[7:]  # strip off _synth_
@@ -292,7 +320,7 @@ class TestImageMaker(object):
         """
         return [self._func_prefix(func) for func in dir(self) if func.startswith("_synth_")]
 
-    def make_image(self, name):
+    def make_image(self, name, **kwargs):
         """
         Create an image of the specified type.
         """
@@ -300,7 +328,7 @@ class TestImageMaker(object):
         if name not in self._type_list:
             raise ValueError(f"Invalid type name: {name}, must be one of {self._type_list}")
         func = getattr(self, f"_synth_{name}")
-        return func()
+        return func(**kwargs)
     
     def get_types(self):
         return self._type_list
@@ -319,8 +347,15 @@ def test_images():
     test_types = maker.get_types()
     logging.info("Available test image types: %s" % (test_types,))
     n_types = len(test_types)
-    n_cols = int(np.min((np.ceil(np.sqrt(n_types) *1.0), n_types)))
+    n_cols = 4
     n_rows = int(np.ceil(n_types / n_cols))
+    
+    
+    spec_kwargs = {'lines': {'centers': np.array([[0.0, 0.0], [0.5, 0.5], [-0.5, -0.5]]),
+                            'angles': np.array([np.pi/4, -np.pi/4, np.pi/2])},
+                   'circles': {'centers': np.array([[0.0, 0.0], [0.5, -0.5], [-0.5, 0.5]]),
+                               'radii': np.array([0.3, 0.2, 0.2])},
+                   'is_color': True}
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols*3, n_rows*3))
     if isinstance(axes, np.ndarray):
@@ -328,7 +363,8 @@ def test_images():
     else:
         axes = [axes]
     for i in range(n_types):
-        img = maker.make_image(test_types[i])
+        kwargs = spec_kwargs if test_types[i]=='spec_image' else {}
+        img = maker.make_image(test_types[i], **kwargs)
         ax = axes[i]
         ax.imshow(img, cmap='gray' if img.ndim==2 else None)
         ax.set_title(f"{test_types[i]}", fontsize=14)
@@ -339,7 +375,24 @@ def test_images():
     plt.suptitle("Test Images (size:  %i x %i)" % (maker._wh[0], maker._wh[1]), fontsize=16)
     plt.tight_layout()
     plt.show()
+    
+def test_spec_image():
+    lines = {'centers': np.array([[0.0, 0.2], [0.0, -0.2]]),
+             'angles': np.array([0, 1])}
+    tim = TestImageMaker((100,300))
+    img = tim._synth_spec_image(lines=lines, is_color=False)
+    plt.figure(figsize=(6,6))
+    plt.imshow(img, cmap='gray' if img.ndim==2 else None)
+    plt.title("spec_image", fontsize=16)
+    # plt.axis('off')
+    # invert y-axis
+    plt.gca().invert_yaxis()
+    plt.show()  
+    
+    
+    
 if __name__=="__main__":
     logging.basicConfig(level=logging.INFO)
-    test_images()
+    # test_images()
     # test_single9()
+    test_spec_image()

@@ -1,12 +1,6 @@
-import sys
-import time
+import matplotlib.pyplot as plt
 import tensorflow as tf
-import tempfile
-import shutil
-try:
-    import cPickle as cp
-except ImportError:
-    import pickle as cp
+import pickle as cp
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
@@ -14,67 +8,117 @@ from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import Callback
 import numpy as np
 import cv2
-import time
 import os
 import logging
-from util import make_input_grid, downscale_image, make_central_weights, fade
-import argparse
-from threading import Thread, Lock
+from util import make_input_grid, downscale_image, make_central_weights
 from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
 import matplotlib.pyplot as plt
-import json
-from skimage import measure
-import matplotlib.gridspec as gridspec
-from synth_image import TestImageMaker
-from copy import deepcopy
 
 
 DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'sigmoid': NormalLayer}
-
-
-
+import tensorflow as tf
 
 class NoisyOptimizer(tf.keras.optimizers.Optimizer):
+    """
+    Wrapper optimizer: adds Gaussian noise to gradients, then delegates to `base_optimizer`.
+    Note: we pass a dummy learning_rate to super().__init__ because the Optimizer base requires it.
+    """
     def __init__(self, base_optimizer, name="NoisyOpt", **kwargs):
-        """
-        Add Gaussian noise to the gradients at each step, with standard deviation sigma
-        :param base_optimizer: a tf.keras.optimizers.Optimizer instance
-        :param sigmas: list of sigma values to use, one per epoch (after which it will be zero)        
-        """
-        if "learning_rate" not in kwargs:
-            base_lr = getattr(base_optimizer, "learning_rate", None)
-            if base_lr is None:
-                base_lr = getattr(base_optimizer, "lr", None)
-            if base_lr is None:
-                raise ValueError("Base optimizer must expose a learning rate for NoisyOptimizer")
-            kwargs["learning_rate"] = base_lr
-        super().__init__(name=name, **kwargs)
-        self.base = base_optimizer
-        self.step = tf.Variable(0, trainable=False, dtype=tf.int64)
-        self.sigmas=None
-        
-    def set_sigmas(self, sigmas):
-        self.sigmas = tf.constant(sigmas, dtype=tf.float32)
+        # Optimizer base requires a learning_rate argument in many TF versions.
+        # Use a harmless dummy value (we delegate updates to `base_optimizer` anyway).
+        super().__init__(learning_rate=0.0, name=name, **kwargs)
 
-    def apply_gradients(self, grads_and_vars, name=None, **kwargs):
-        sigma = self.sigmas[self.step] if self.step < len(self.sigmas) else 0.0
+        self.base = base_optimizer
+        # step counter for indexing sigmas (int64 so it matches many TF counters)
+        self.step = tf.Variable(0, trainable=False, dtype=tf.int64, name="noisy_step")
+        self.sigmas = None  # will hold a 1-D tf.Tensor of sigma values if set
+
+    def set_sigmas(self, sigmas):
+        """Accepts a list/tuple/1D-np-array or 1D-tf.Tensor of stddevs to use per-step.
+        If the step index exceeds the length, the final value will be used (or 0 if not provided)."""
+        self.sigmas = tf.convert_to_tensor(list(sigmas), dtype=tf.float32)
+
+    def _add_noise_to_grad(self, g, sigma):
+        """Add noise while preserving IndexedSlices (for embeddings)."""
+        if g is None:
+            return None
+        if isinstance(g, tf.IndexedSlices):
+            vals = g.values + tf.random.normal(tf.shape(g.values), stddev=sigma)
+            return tf.IndexedSlices(vals, g.indices, g.dense_shape)
+        else:
+            return g + tf.random.normal(tf.shape(g), stddev=sigma)
+        
+            
+    def apply_gradients_new(self, grads_and_vars, name=None, **kwargs):
+        # Determine noise level
+        if self.sigmas is not None and int(self.step) < len(self.sigmas):
+            sigma = self.sigmas[self.step]
+        else:
+            sigma = 0.0
+
+        # Add Gaussian noise
         noisy = [
             (g + tf.random.normal(tf.shape(g), stddev=sigma) if g is not None else None, v)
             for g, v in grads_and_vars
         ]
+
+        # Step bookkeeping
         self.step.assign_add(1)
         self.iterations.assign_add(1)
-        return self.base.apply_gradients(noisy, name=name, **kwargs)
+
+        # ✅ Don't pass 'name' or extra kwargs to base optimizer
+        return self.base.apply_gradients(noisy)
+
+
+
+    def apply_gradients(self, grads_and_vars, name=None, **kwargs):
+        # compute scalar sigma for this step
+        if self.sigmas is None:
+            sigma = tf.constant(0.0, dtype=tf.float32)
+        else:
+            # clamp index so we don't go out of bounds; use last sigma if step >= len(sigmas)
+            idx = tf.cast(self.step, tf.int32)
+            last_idx = tf.maximum(tf.shape(self.sigmas)[0] - 1, 0)
+            idx_clamped = tf.minimum(idx, last_idx)
+            sigma = self.sigmas[idx_clamped]
+
+        # add noise to each gradient (properly handling None and IndexedSlices)
+        noisy = []
+        for g, v in grads_and_vars:
+            noisy_g = self._add_noise_to_grad(g, sigma) if g is not None else None
+            noisy.append((noisy_g, v))
+
+        # increment counters
+        # (self.iterations is provided by the Optimizer base class)
+        self.step.assign_add(1)
+        self.iterations.assign_add(1)
+
+        # delegate the actual update to the wrapped optimizer
+        return self.base.apply_gradients(noisy,**kwargs)
 
     def get_config(self):
+        # serialize base optimizer and sigmas (if present)
         config = super().get_config()
         config.update({
-            "sigmas": self.sigmas,
             "base_optimizer": tf.keras.optimizers.serialize(self.base),
+            "sigmas": None if self.sigmas is None else self.sigmas.numpy().tolist(),
         })
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        base_opt = tf.keras.optimizers.deserialize(config.pop("base_optimizer"))
+        sigmas = config.pop("sigmas", None)
+        obj = cls(base_opt, **config)
+        if sigmas is not None:
+            obj.set_sigmas(sigmas)
+        return obj
+
+    def update_learning_rate(self, learning_rate):
+        self.base.learning_rate.assign(learning_rate)
+        logging.info("Updated learning rate to:  %.6f" % (self.base.learning_rate,))
 
 
 class NNetImage(object):
@@ -134,7 +178,7 @@ class NNetImage(object):
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
             # (so they can be None in the args)
-            state = ScaleInvariantImage._load_state(state_file)
+            state = NNetImage._load_state(state_file)
             weights = state['weights']
             self.cycle, self.image_raw, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness, self._downscale = \
                 state['cycle'], state['image_raw'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness'], state['downscale']
@@ -162,11 +206,23 @@ class NNetImage(object):
             self._model.set_weights(weights)
         else:
             logging.info("Initialized new model.")
-        print("Learning rate:  %.7f" % self._learning_rate)
-        base_optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=False, ema_momentum=0.99)
-        
-        optimizer = NoisyOptimizer(base_optimizer)
-        self._model.compile(loss='mean_squared_error', optimizer=optimizer)  # default 0.001
+            
+            
+            
+        base_optimizer = tf.keras.optimizers.Adadelta(
+            learning_rate=1.0, use_ema=False, ema_momentum=0.99
+        )
+
+        self._optimizer = NoisyOptimizer(base_optimizer)
+
+        self._model.compile(loss='mean_squared_error', optimizer=self._optimizer)
+            
+            
+            
+        # print("Initial learning rate:  %.7f" % self._learning_rate)
+        # base_optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=False, ema_momentum=0.99)
+        # optimizer = NoisyOptimizer(base_optimizer)
+        # self._model.compile(loss='mean_squared_error', optimizer=optimizer)  # default 0.001
 
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
@@ -511,14 +567,10 @@ class NNetImage(object):
         logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
         return loss
 
-    def _update_learning_rate(self, learning_rate):
-        self._learning_rate = learning_rate
-        self._model.optimizer.learning_rate.assign(self._learning_rate)
-        logging.info("Updated learning rate to:  %.6f" % (self._learning_rate,))
 
     def train_more(self, epochs, learning_rate=None, noise_temps=None, verbose=True):
         if learning_rate is not None and learning_rate != self._learning_rate:
-            self._update_learning_rate(learning_rate)
+            self._optimizer.update_learning_rate(learning_rate)
 
         input, output = self._input, self._output
 
@@ -749,19 +801,56 @@ class BatchLossCallback(Callback):
 
 def test_vertical():
     
-    lines = {'centers': np.array([[0.0, 0.2], [0.0, -0.2]]),
-             'angles': np.array([0, 1])}
-    tim = TestImageMaker(image_size_wh=(20,36))
-    test_image = tim.make_image('spec_image', lines = lines, is_color=False)
-    n_div = {'linear': 2, 'circular': 0, 'sigmoid': 0}
+    # TEST IMAGE:
+    # Synthetic
+    # lines = {'centers': np.array([[0.0, 0.2], [0.0, -0.2]]),
+    #          'angles': np.array([0, 1])}
+    # tim = TestImageMaker(image_size_wh=(20,36))
+    # test_image = tim.make_image('spec_image', lines = lines, is_color=False)
+    # n_div = {'linear': 2, 'circular': 0, 'sigmoid': 0}    
+    
+    # python image_learn.py -i .\input\barn.png -l 64 -c 0 -t 64 -n 64 -p 1 -x 3 -r 1    -e 20 -k 200 --lines_params 3  -z 65536   --gradient_sharpness 2.0 --save_frames batch64k_64_64tc_LR1  -w 10.0 .18 .33 .678 .412 
 
-    kwargs = {'image_raw': test_image, 'n_hidden': 4, 'n_structure': 0, 'n_div': n_div, 'nogui': False, 'learning_rate': 20.0,
-              'learning_rate_final': 0.1, 'learning_rate_final': 0.01,
-              'epochs_per_cycle': 10,  'display_multiplier': 10}
+    barn_image = cv2.imread(r'input/barn.png')    
+    n_div = {'linear': 64, 'circular': 0, 'sigmoid': 0}    
+    barn_weights =  {'w_max': 10, 
+                         'r_inner': .18,
+                         'r_outer': .33,
+                         'offsets_xy_rel': (.678, .412)}
+
+    
+    anneal_args = [10.0, 0.001, 1000]
+
+    # The rest of the training parameters:
+    kwargs = {'image_raw': barn_image,  'display_multiplier': 3, 'downscale': 1,
+              'gradient_sharpness': 2.0,
+              'n_hidden': 64, 'n_structure': 64, 'n_div': n_div, 
+              'center_weight_params': barn_weights,    
+              'learning_rate': 1.0, 
+              #'learning_rate_final': 0.0001,  # run_cycles must be > 0 for this to be used
+              #'anneal_args': anneal_args, 
+              'batch_size': 65536,
+              'run_cycles': 5, 'epochs_per_cycle': 20}
+    
     s = NNetImage(**kwargs)
-    loss = s.train_more(epochs=30, learning_rate=5.0, noise_temps=np.linspace(10, .01, 25))
-    print("Final loss:  %s epochs,  %s" % (loss[-1][-1],)) 
-
+    
+    # DO cycles manually here:
+    for cycle_ind in range(kwargs['run_cycles']):
+        print("Cycle %i/%i -------------------------" % (cycle_ind+1, kwargs['run_cycles']))
+        # linearly anneal noise temperature from 10 to 0.01 over the cycles
+        noise_temps = np.linspace(10, .01, kwargs['epochs_per_cycle'])
+        # TODO: implement learning rate decay with learning_rate_final argument
+        learning_rate = kwargs['learning_rate']
+        loss = s.train_more(epochs=kwargs['epochs_per_cycle'], learning_rate=learning_rate, 
+                            noise_temps=noise_temps, verbose=True)
+        epoch_means = [np.mean(epoch)for epoch in loss]
+        print("Last cycle mean loss:  %.6f,  Last epoch mean loss:  %.6f,  Last minibatch loss:" % (
+            np.mean(epoch_means), epoch_means[-1]), loss[-1][-1])
+    
+    img = s.gen_image((200, 360), border=0.1, keep_aspect=True)
+    plt.imshow(img)
+    plt.axis('off')
+    plt.show()
 
 
 if __name__ == "__main__":

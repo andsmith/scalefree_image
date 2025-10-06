@@ -49,16 +49,7 @@ class NoisyOptimizer(tf.keras.optimizers.Optimizer):
                 base_lr = getattr(base_optimizer, "lr", None)
             if base_lr is None:
                 raise ValueError("Base optimizer must expose a learning rate for NoisyOptimizer")
-            base_lr_value = base_lr
-            if isinstance(base_lr_value, (tf.Variable, tf.Tensor)):
-                base_lr_value = base_lr_value.numpy()
-            if hasattr(base_lr_value, "numpy"):
-                base_lr_value = base_lr_value.numpy()
-            if isinstance(base_lr_value, np.ndarray):
-                base_lr_value = float(base_lr_value.reshape(()))
-            if not (np.isscalar(base_lr_value) or callable(base_lr_value)):
-                raise ValueError("Learning rate for NoisyOptimizer must be scalar, schedule, or callable")
-            kwargs["learning_rate"] = base_lr_value
+            kwargs["learning_rate"] = base_lr
         super().__init__(name=name, **kwargs)
         self.base = base_optimizer
         self.step = tf.Variable(0, trainable=False, dtype=tf.int64)

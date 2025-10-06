@@ -105,8 +105,8 @@ class UIDisplay(object):
         self._image_raw, self._file_prefix = self._set_image(image_file, synth_image_name)
 
         self._sim = NNetImage(n_div=self.n_div, n_hidden=n_hidden, n_structure=n_structure, learning_rate_initial=self._learn_rate,
-                                        batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, line_params=self._line_params,
-                                        downscale=self._downscale, center_weight_params=self._center_weight_params, dry_run=dry_run,**kwargs)
+                        batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, line_params=self._line_params,
+                        downscale=self._downscale, center_weight_params=self._center_weight_params, dry_run=dry_run,**kwargs)
 
         # Check for metadata file
         if state_file is not None:

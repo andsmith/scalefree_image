@@ -393,7 +393,7 @@ class UIDisplay(object):
         meta_path = '.' if self._frame_dir is None else self._frame_dir
         meta_file_path = os.path.join(meta_path, meta_filename)
         metadata = {'frames': deepcopy(self._metadata),
-                    'model_file': self._model_state_path,
+                    'model_file': self.get_filename('model'),
                     'train_image_file': self._train_img_filename,
                     'train_downscale': self._downscale,
                     'loss_history': self._loss_history,
@@ -723,9 +723,9 @@ class UIDisplay(object):
                     artists['loss']['epoch_means'].set_data(ex, ey)
                     artists['loss']['cycle_means'].set_data(cx, cy)
                 # set x and y limits (x should be flush to cycle boundaries, y should have a .05 margin top and bottom)
-                x_min, x_max = cycle_means_x[0], cycle_means_x[-1]
+                x_min, x_max = first_cycle, self._cycle
                 y_min, y_max = np.min(minibatch_losses), np.max(minibatch_losses)
-                loss_ax.set_xlim(x_min - 0.025 * (x_max - x_min), x_max + 0.025 * (x_max - x_min))
+                loss_ax.set_xlim(x_min,x_max)
                 loss_ax.set_ylim(y_min/10.0**.1, y_max*10.0**.1)
                 
                 
@@ -753,8 +753,8 @@ class UIDisplay(object):
                     anneal_ax.set_ylim(y_min, y_max)
                 
                 # set shared x limit
-                x_min, x_max = cycle_means_x[0], cycle_means_x[-1]
-                lrate_ax.set_xlim(x_min, x_max)
+                #x_min, x_max = cycle_means_x[0], cycle_means_x[-1]
+                #lrate_ax.set_xlim(x_min, x_max)
             
             #Set loss rate axis x ticks to integers only:
             ticker = plt.MaxNLocator(integer=True)
@@ -828,7 +828,7 @@ def get_args():
                         "activation(excitation) = tanh(excitation*sharpness).", type=float, default=1000.0)
     parser.add_argument('--gradient_sharpness', help="Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual" +
                         " (very flat) gradient.  High values result in divider units not moving very much, too low" +
-                        " and they don't settle.", type=float, default=5.0)
+                        " and they don't settle.", type=float, default=2.0)
     parser.add_argument('-f', '--save_frames',
                         help="Save frames during training to this directory (must exist).", type=str, default=None)
     parser.add_argument("-w", "--weigh_center", 
@@ -878,7 +878,7 @@ def get_args():
         raise Exception("If using --weigh_center, must provide 5 values:  r_inner, r_outer, w_max, x_offset_rel, y_offset_rel")
     else:
         center_weight = None
-        
+    
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight, 'dry_run': parsed.dry_run,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
               'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,

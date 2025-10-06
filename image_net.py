@@ -128,7 +128,24 @@ class NNetImage(object):
 
     """
 
-    def __init__(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
+    def __init__(self, *args, **kwargs):
+        import pprint
+        print("\n\n\n***********************")    
+        print("SCALEFREE INIT ARGS:")
+        pprint.pprint(args)
+        print("\nSCALEFREE INIT KWARGS:")
+        image = None
+        if 'image_raw' in kwargs:
+            image = kwargs['image_raw']
+            kwargs['image_raw'] = "Image:  %s" % (image.shape,)  # avoid printing large image array
+        pprint.pprint(kwargs)
+        if image is not None:
+            kwargs['image_raw'] = image
+        print("***********************\n\n\n")
+        
+        self._init(*args, **kwargs)
+        
+    def _init(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
                  learning_rate_initial=1.0, downscale=1.0, center_weight_params=None, line_params=3, dry_run=False, **kwargs):
         """
         :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
@@ -809,10 +826,8 @@ def test_vertical():
     # test_image = tim.make_image('spec_image', lines = lines, is_color=False)
     # n_div = {'linear': 2, 'circular': 0, 'sigmoid': 0}    
     
-    # python image_learn.py -i .\input\barn.png -l 64 -c 0 -t 64 -n 64 -p 1 -x 3 -r 1    -e 20 -k 200 --lines_params 3  -z 65536   --gradient_sharpness 2.0 --save_frames batch64k_64_64tc_LR1  -w 10.0 .18 .33 .678 .412 
+    #  python image_learn.py -i .\input\barn.png -l 64 -c 0 -t 255 -n 64 -p 3 -x 6 -r 1  -e 10 -k 1 -z 32768  -w 10.0 .18 .33 .678 .412  --nogui
 
-    barn_image = cv2.imread(r'input/barn.png')    
-    n_div = {'linear': 64, 'circular': 0, 'sigmoid': 0}    
     barn_weights =  {'w_max': 10, 
                          'r_inner': .18,
                          'r_outer': .33,
@@ -822,15 +837,18 @@ def test_vertical():
     anneal_args = [10.0, 0.001, 1000]
 
     # The rest of the training parameters:
-    kwargs = {'image_raw': barn_image,  'display_multiplier': 3, 'downscale': 1,
-              'gradient_sharpness': 2.0,
-              'n_hidden': 64, 'n_structure': 64, 'n_div': n_div, 
+    kwargs = {'image_raw': cv2.imread(r'input/barn.png'),  
+            'n_div': {'linear': 64, 'circular': 0, 'sigmoid': 0}, 
+              'n_hidden': 64, 'n_structure': 255,
+              'display_multiplier': 6,
+              'downscale': 3.0,
               'center_weight_params': barn_weights,    
               'learning_rate': 1.0, 
               #'learning_rate_final': 0.0001,  # run_cycles must be > 0 for this to be used
               #'anneal_args': anneal_args, 
-              'batch_size': 65536,
-              'run_cycles': 5, 'epochs_per_cycle': 20}
+              'nogui': True,
+              'batch_size': 32768,
+              'run_cycles': 1, 'epochs_per_cycle': 10}
     
     s = NNetImage(**kwargs)
     

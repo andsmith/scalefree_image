@@ -183,7 +183,7 @@ class ScaleFreeImage(object):
             x = Dense(n, activation=activation, use_bias=True)(x)
         outputs = Dense(n_output, activation='sigmoid')(x)
         self._model = Model(inputs=inputs, outputs=outputs)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, use_ema=True, ema_momentum=0.99)
         
         if not self._clobber:
             if weights_file is not None:
@@ -222,8 +222,8 @@ class ScaleFreeImage(object):
             b = self.train_image[:,:,2].flatten()
             self._output = np.vstack((r,g,b)).T
             order = np.random.permutation(self._input.shape[0])
-            self._input = self._input[order]
-            self._output = self._output[order]
+            input = self._input[order]
+            output = self._output[order]
             
         else:
             x = np.random.uniform(self.xlim[0], self.xlim[1], size=(self.n_train,1))
@@ -231,13 +231,14 @@ class ScaleFreeImage(object):
             x_pixel = ((x - self.xlim[0]) / (self.xlim[1] - self.xlim[0]) * (self.train_image.shape[1]-1))
             y_pixel = ((y - self.ylim[0]) / (self.ylim[1] - self.ylim[0]) * (self.train_image.shape[0]-1))
             
-            self._input = np.hstack((x,y))
+            input = np.hstack((x,y))
             
             
             r = ndimage.map_coordinates(self.train_image[:,:,0], [y_pixel.flatten(), x_pixel.flatten()], order=1)
             g = ndimage.map_coordinates(self.train_image[:,:,1], [y_pixel.flatten(), x_pixel.flatten()], order=1)
             b = ndimage.map_coordinates(self.train_image[:,:,2], [y_pixel.flatten(), x_pixel.flatten()], order=1)
-            self._output = np.vstack((r,g,b)).T
+            output = np.vstack((r,g,b)).T
+        return input, output
 
     def _train_loop(self,verbose=False):
         n_new_cycles = 0
@@ -265,7 +266,8 @@ class ScaleFreeImage(object):
                 if self._shutdown:
                     break
                 self.epoch_ind = epoch
-                self._sample_training_input()
+                self._input, self._output = self._sample_training_input()
+                
                 loss =self._model.fit(self._input, 
                                 self._output, 
                                 epochs=1,
@@ -343,7 +345,8 @@ class ScaleFreeImage(object):
                 
             cv2.imshow(self._win_name, frame)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            if key == ord('q') or key == 27:  # ESC
+                logging.info("Quit key pressed, exiting.")
                 self._shutdown = True
                 break
 

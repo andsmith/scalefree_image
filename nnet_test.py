@@ -10,7 +10,7 @@ import cv2
 import logging
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Input
-from util import make_input_grid
+from util import make_input_grid, poly_expand_features
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import Callback
 import time
@@ -23,7 +23,8 @@ import os
 
 class ScaleFreeImage(object):
     def __init__(self, image_filename, out_dir, layers=(100,100), batch_size=1024, n_train_sample=16384, cycles_to_run=-1,
-                    display_multiplier=1.0, learning_rate=0.001, weights_file=None, epochs_per_cycle=100, clobber=False):
+                    display_multiplier=1.0, learning_rate=0.001, weights_file=None, epochs_per_cycle=100, clobber=False,
+                    order=1):
         self.learning_rate = learning_rate
         self._shutdown = False
         self._disp_mul = display_multiplier
@@ -31,6 +32,7 @@ class ScaleFreeImage(object):
         self.layers = layers
         self.batch_size = batch_size
         self.out_dir= out_dir
+        self.order = order
         self._win_name = "Feed-forward network %s learning scale-free image." % (str(layers),)
         self._filename_base =self._get_base_filename(image_filename)
         self._clobber=clobber
@@ -156,7 +158,8 @@ class ScaleFreeImage(object):
 
         # For generating the output image:
         x, y = make_input_grid(output_shape_hw, resolution=1.0) # already magnifide
-        self._output_xy = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
+        output_xy = np.hstack((x.reshape(-1, 1), y.reshape(-1, 1)))
+        self._output_xy_poly = poly_expand_features(output_xy, self.order)
         
         # For defining color positions for training input sampling (interpolated xy positions):
         x, y = make_input_grid(self.train_image.shape[:2], resolution=1.0)
@@ -175,15 +178,17 @@ class ScaleFreeImage(object):
         return img
 
     def _init_model(self, weights_file=None):
-        n_input,n_output = 2,3
+        n = self.order
+        n_input =  (n+1) * (n+2) //2  #  number of terms in 2D polynomial of order n
+        n_output = 3
         inputs = Input(shape=(n_input,)) # x,y input
         x = inputs
         for n in self.layers:
             activation = 'relu' # if n > 0 else 'sigmoid'
-            x = Dense(n, activation=activation, use_bias=True)(x)
+            x = Dense(n, activation=activation, use_bias=(n>0))(x)  # Input bias included in polynomial expansion
         outputs = Dense(n_output, activation='sigmoid')(x)
         self._model = Model(inputs=inputs, outputs=outputs)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, use_ema=True, ema_momentum=0.99)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, use_ema=False, ema_momentum=0.9)
         
         if not self._clobber:
             if weights_file is not None:
@@ -216,15 +221,15 @@ class ScaleFreeImage(object):
         """ 
         """
         if self.n_train == 0:
-            self._input = self._train_xy
+            input = self._train_xy
             r = self.train_image[:,:,0].flatten()
             g = self.train_image[:,:,1].flatten()
             b = self.train_image[:,:,2].flatten()
-            self._output = np.vstack((r,g,b)).T
-            order = np.random.permutation(self._input.shape[0])
-            input = self._input[order]
-            output = self._output[order]
-            
+            output = np.vstack((r,g,b)).T
+            order = np.random.permutation(input.shape[0])
+            input = input[order]
+            output = output[order]
+
         else:
             x = np.random.uniform(self.xlim[0], self.xlim[1], size=(self.n_train,1))
             y = np.random.uniform(self.ylim[0], self.ylim[1], size=(self.n_train,1))
@@ -238,11 +243,16 @@ class ScaleFreeImage(object):
             g = ndimage.map_coordinates(self.train_image[:,:,1], [y_pixel.flatten(), x_pixel.flatten()], order=1)
             b = ndimage.map_coordinates(self.train_image[:,:,2], [y_pixel.flatten(), x_pixel.flatten()], order=1)
             output = np.vstack((r,g,b)).T
+            
+        
+        input = poly_expand_features(input, self.order)    
+        
         return input, output
+    
 
     def _train_loop(self,verbose=False):
         n_new_cycles = 0
-        output_pred = self._model.predict(self._output_xy, verbose=verbose, batch_size=65536)
+        output_pred = self._model.predict(self._output_xy_poly, verbose=verbose, batch_size=65536)
         self.output_image = self._output_vec_to_image(output_pred, self.output_shape)
 
         if self.cycle_ind==0:
@@ -278,7 +288,7 @@ class ScaleFreeImage(object):
             cycle_info= {'losses': loss_tracker.losses,'learning_rate': self.learning_rate}    
             # RECOMPUTE OUTPUT IMAGE:
 
-            output_pred = self._model.predict(self._output_xy, verbose=verbose, batch_size=32768)
+            output_pred = self._model.predict(self._output_xy_poly, verbose=verbose, batch_size=32768)
             # SAVE STATE:
             end_time = time.time()
             cycle_time = end_time - start_time
@@ -390,8 +400,11 @@ def get_args():
     parser.add_argument('-x', '--display_multiplier', type=float, default=1.0, help='The output frame will be this X the size of the training image.')
     parser.add_argument('-r', '--learning_rate', type=float, default=0.001, help='Learning rate for the optimizer.')
     parser.add_argument('-w', '--weights_file', type=str, default=None, help='Path to load model weights from.')
+    parser.add_argument('-o', '--order', type=int, default=1, help='1=(input is 1, x, y), 2=(input is 1, x, y, x^2, y^2, xy)')
     parser.add_argument('--nogui', action='store_true', help='Run in no-GUI mode (just training).')
     parser.add_argument('--clobber', action='store_true', help='Overwrite existing files, train from scratch etc.')
+    
+    
     
 
     args = parser.parse_args()
@@ -411,7 +424,8 @@ def app():
                          learning_rate=args.learning_rate,
                          weights_file=args.weights_file,
                          n_train_sample=args.num_train,
-                         clobber=args.clobber)
+                         clobber=args.clobber,
+                         order=args.order)
     sfi.run(no_gui = args.nogui)
 
 if __name__ == "__main__":

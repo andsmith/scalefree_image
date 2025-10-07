@@ -1,3 +1,4 @@
+import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import pickle as cp
@@ -174,6 +175,7 @@ class NNetImage(object):
         self.sample_weights = None
         self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
+        self.epoch=0
         self._center_weight_params = center_weight_params
         self._learning_rate = learning_rate_initial
         self._artists = {'circular':{
@@ -188,6 +190,8 @@ class NNetImage(object):
         self.anneal_temp = 0.0
         self._lims_set = False
         self.cur_loss = -1
+
+        self.stop = False  # set to True to interrupt training loop (don't forget to reset to False if you call train_more() again)
 
         # SET UP MODEL, LOAD IMAGE
         if state_file is not None:
@@ -601,38 +605,69 @@ class NNetImage(object):
 
 
     def train_more(self, epochs, learning_rate=None, noise_temps=None, verbose=True):
+        
+        # Update learning rate if needed:
         if learning_rate is not None and learning_rate != self._learning_rate:
             self._optimizer.update_learning_rate(learning_rate)
-
-        input, output, sample_weights = self._sample_training_input(n_train=self.n_train, sample_weights=self.sample_weights)
-        
-        
-        
-        
-        # Save numpy training set:
-        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image.shape)
         self.anneal_temp = noise_temps[0] if noise_temps is not None else 0.0
         if noise_temps is not None:
             # Langevin dynamics noise:
             noise_sds = np.sqrt(2 * learning_rate * np.array(noise_temps))
         else:
             noise_sds = np.array([0.0])
-
+        # input, output, sample_weights = self._sample_training_input(n_train=self.n_train, sample_weights=self.sample_weights)
+        
+        n_input =  self.n_train if self.n_train>0 else self.input_xy.shape[0]
         batch_losses = BatchLossCallback(dry_run=self.dry_run,
                                          n_epochs=epochs,
                                          noise_sds=noise_sds, 
-                                         n_train=input.shape[0],
+                                         n_train=n_input,
                                          batch_size=self.batch_size, 
                                          anneal_temps=noise_temps)
-        
-        swt = ", sample weight range [%.6f, %.6f]" % (np.min(sample_weights), np.max(sample_weights)) if sample_weights is not None else ""
-        logging.info("... More training with %i epochs%s" % (epochs, swt))
-        
+
+        logging.info("Training %i more epochs with:" % (epochs, ))
+        logging.info("\tnumber of samples: %i"% (n_input, ))
+        logging.info("\tminibatch size: %i" % (self.batch_size, ))
+        logging.info("\tnumber of minibatches/epoch: %i" % (int(np.ceil(n_input / self.batch_size)), ))
+        logging.info("\tlearning rate: %.6f" % (self._learning_rate, ))
+        # logging.info("\tnoise stddevs: %s" % (noise_sds,))
         self._model.optimizer.set_sigmas(noise_sds)
         
-        if not self.dry_run:
-            self._fit(input, output, epochs=epochs, sample_weight=sample_weights,
-                            batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
+        self.epoch=0
+        epoch_times = []
+        epoch_losses = []
+        
+        for current_epoch in range(epochs):
+            self.epoch = current_epoch
+            input, output, sample_weights = self._sample_training_input(n_train=self.n_train, sample_weights=self.sample_weights)
+            
+            print("\n\n\nInput values span range:  x: [%.3f, %.3f], y: [%.3f, %.3f]" % (input[:,0].min(), input[:,0].max(), input[:,1].min(), input[:,1].max()))
+            print("Output values span range:  r: [%.3f, %.3f], g: [%.3f, %.3f], b: [%.3f, %.3f]" % (output[:,0].min(), output[:,0].max(), output[:,1].min(), output[:,1].max(), output[:,2].min(), output[:,2].max()))  
+            print("Sample weights span range:  [%.3f, %.3f]" % (sample_weights.min(), sample_weights.max()) if sample_weights is not None else "No sample weights")
+            
+            t0 = time.perf_counter()
+            self._fit(input, output, epochs=1, sample_weight=sample_weights,
+                        batch_size=self.batch_size, verbose=False, callbacks=[batch_losses])
+            comp_time = time.perf_counter() - t0
+            epoch_times.append(comp_time)
+            if len(batch_losses.losses) > 0:
+                epoch_mean_loss = np.mean(batch_losses.losses[-1])
+                epoch_losses.append(epoch_mean_loss)
+            else:
+                epoch_mean_loss = -1.0
+            logging.info("\t\tCompleted epoch %3i / %3i, time: %.3fs, mean minibatch loss: %.6f" % (current_epoch+1, epochs, comp_time, epoch_mean_loss))
+            if self.stop:
+                logging.info("Training interrupted at epoch %i." % (current_epoch+1,))
+                break
+        cyc_mean_loss = np.mean(epoch_losses) if len(epoch_losses) > 0 else -1.0
+        cycle_total_time = np.sum(epoch_times) if len(epoch_times) > 0 else 0.0
+        logging.info("\tCycle %i completed %i epochs in %.3f seconds, with mean loss:  %.6f" % (self.cycle, epochs, cycle_total_time, cyc_mean_loss))
+
+
+        # if not self.dry_run:
+            
+        #     self._fit(input, output, epochs=epochs, sample_weight=sample_weights,
+        #                     batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
         # Get loss for each step
         loss_history = batch_losses.losses
         self.cur_loss = np.mean(loss_history[-1]) if len(loss_history) > 0 else -2

@@ -413,6 +413,7 @@ class UIDisplay(object):
         if event.key == 'x' or event.key == 'escape' or event.key == 'q':
             logging.info("Shutdown requested, waiting for worker to finish...")
             self._shutdown = True
+            self._sim.stop=True
         elif event.key =='d':
             # toggle annotation of divider units
             self._show_dividers = not self._show_dividers
@@ -767,12 +768,12 @@ class UIDisplay(object):
             t0 = time.perf_counter()                
             plt.tight_layout()
             tl_times.append(time.perf_counter() - t0)
-            if len(tl_times) % 10 == 0:
-                logging.info("Tight_layout time (last %i iters): min %.3f sec, max %.3f sec, mean %.3f sec" % (len(tl_times), 
-                                                                                                               np.min(tl_times), 
-                                                                                                               np.max(tl_times),
-                                                                                                               np.mean(tl_times)))
-                #tl_times=[]
+            # if len(tl_times) % 10 == 0:
+            #     logging.info("Tight_layout time (last %i iters): min %.3f sec, max %.3f sec, mean %.3f sec" % (len(tl_times), 
+            #                                                                                                    np.min(tl_times), 
+            #                                                                                                    np.max(tl_times),
+            #                                                                                                    np.mean(tl_times)))
+            #     #tl_times=[]
 
             plt.draw()
             fig.canvas.flush_events()  # Force canvas to update
@@ -914,4 +915,5 @@ if __name__ == "__main__":
     pprint.pprint(print_args)
     
     s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file, **kwargs)
+    
     s.run()

@@ -15,7 +15,7 @@ from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
 import matplotlib.pyplot as plt
-
+import scipy.ndimage as ndimage
 
 DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'sigmoid': NormalLayer}
 import tensorflow as tf
@@ -145,10 +145,10 @@ class NNetImage(object):
         
         self._init(*args, **kwargs)
         
-    def _init(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
-                 learning_rate_initial=1.0, downscale=1.0, center_weight_params=None, line_params=3, dry_run=False, **kwargs):
+    def _init(self, image, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=2.0, 
+                 learning_rate_initial=1.0, n_train=0, center_weight_params=None, line_params=3, dry_run=False, **kwargs):
         """
-        :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
+        :param image: a HxWx3 or HxW numpy array containing the target image.  Training is on samples from this image.
         :param n_hidden: number of hidden units in the middle
         :param n_structure: number of structure units
         :param n_div: dictionary containing the number of input units for each division type
@@ -159,11 +159,10 @@ class NNetImage(object):
         :param sharpness: sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear
         :param grad_sharpness: sharpness constant for gradient of activation function, e.g. f'(x) = sharpness * sech^2(x*sharpness)
         :param learning_rate_initial: initial learning rate for Adadelta optimizer
-        :param downscale: downscale factor for training image (1.0 = full size, 0.5 = half size, etc)
         :param center_weight_params: if not None, a dict with keys: 'r_inner' (float), 'r_outer' (float), 'w_max' (float), and 'xy_offset' (tuple of floats)
         :param line_params: 2 or 3, parameterization of line units (2 = angle + offset, 3 = angle + center + offset)
         """
-        self.image_raw = image_raw
+        self.image = image
         self._line_params = line_params
         self.n_hidden = n_hidden
         self.n_div = n_div
@@ -171,9 +170,8 @@ class NNetImage(object):
         self.batch_size = batch_size
         self.grad_sharpness = grad_sharpness
         self.dry_run = dry_run
-        self.image_train = None
-        self._downscale = downscale
-        self._sample_weights = None
+        self.n_train = n_train
+        self.sample_weights = None
         self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
         self._center_weight_params = center_weight_params
@@ -189,92 +187,109 @@ class NNetImage(object):
                          'output_image': None}
         self.anneal_temp = 0.0
         self._lims_set = False
-        
         self.cur_loss = -1
 
+        # SET UP MODEL, LOAD IMAGE
         if state_file is not None:
-            # These params can't change (except for updating weights in self._model), so they override the args.
-            # (so they can be None in the args)
             state = NNetImage._load_state(state_file)
-            weights = state['weights']
-            self.cycle, self.image_raw, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness, self._downscale = \
-                state['cycle'], state['image_raw'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness'], state['downscale']
-            # Checks
-            if image_raw is not None and image_raw.shape != self.image_raw.shape:
-                logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
-                                (image_raw.shape, self.image_raw.shape))
-                self.image_raw = image_raw
+            model_weights = state['weights']
+            self.cycle, self.image, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness = \
+                state['cycle'], state['image'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness']
                 
-            if self._downscale != downscale:
-                logging.info("Warning: Command-line is overriding model's downscale factor:  was %.3f, using %.3f" %
-                                (self._downscale, downscale))
-                self._downscale = downscale
+            # Checks & overrides between command line args and state file
+            if image is not None and (image.shape != self.image.shape or not np.allclose(image, self.image)):
+                logging.warning("This appears to be a new image.  Things might get weird...")
+                self.image = image
+            if n_train != self.n_train:
+                logging.info("Using New Number of Training samples from state file:  %d" % (n_train,))
+                self.n_train = n_train
+            if grad_sharpness != self.grad_sharpness:
+                logging.info("Using New Gradient Sharpness from state file:  %d" % (grad_sharpness,))
+                self.grad_sharpness = grad_sharpness
+            if self.n_hidden!= n_hidden:
+                logging.warning("Number of hidden units in state file (%d) does not match argument (%d), using state file." % (self.n_hidden, n_hidden))
+            if self.n_structure != n_structure:
+                logging.warning("Number of structure units in state file (%d) does not match argument (%d), using state file." % (self.n_structure, n_structure))
+            if self.n_div['linear'] != n_div.get('linear', 0) or self.n_div['circular'] != n_div.get('circular', 0) or self.n_div['sigmoid'] != n_div.get('sigmoid', 0):
+                logging.warning("Number each division unit type in state file (%s) does not match argument (%s), using state file." % (self.n_div, n_div))
         else:
-            weights = None
-            
-        # Cache this
-        self._last_downscale = None
-        self._input, self._output = self._make_train(self._downscale)
-
-
+            model_weights = None
         self._model = self._init_model()
-        if weights is not None:
+        if model_weights is not None:
             logging.info("Restored model weights from file:  %s  (resuming at cycle %i)" % (state_file, self.cycle))
-            self._model.set_weights(weights)
+            self._model.set_weights(model_weights)
         else:
-            logging.info("Initialized new model.")
-            
-            
-            
+            logging.info("Initialized new model.")            
         base_optimizer = tf.keras.optimizers.Adadelta(
             learning_rate=1.0, use_ema=False, ema_momentum=0.99
         )
-
         self._optimizer = NoisyOptimizer(base_optimizer)
-
         self._model.compile(loss='mean_squared_error', optimizer=self._optimizer)
-            
-            
-            
-        # print("Initial learning rate:  %.7f" % self._learning_rate)
-        # base_optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=False, ema_momentum=0.99)
-        # optimizer = NoisyOptimizer(base_optimizer)
-        # self._model.compile(loss='mean_squared_error', optimizer=optimizer)  # default 0.001
-
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
-
-    def _make_train(self, downscale, keep_aspect=True):
         
-        if self._last_downscale is not None and self._last_downscale == downscale:
-            return self._input, self._output
-        self._last_downscale = downscale
-
-        self._downscale_level = downscale
-        self.image_train = downscale_image(self.image_raw, self._downscale_level)
-        
-
-        in_x, in_y = make_input_grid(self.image_train.shape, keep_aspect=keep_aspect)
-
-        grid_shape = in_x.shape
-        input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
-        r, g, b = cv2.split(self.image_train / 255.0)
-        output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
-        
-        if self._center_weight_params is not None:
-            train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
-            self._weight_grid = make_central_weights(train_img_size_wh, **self._center_weight_params)
-            logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
-                         (self._center_weight_params['w_max'], self._center_weight_params['r_inner'], train_img_size_wh))
-            self._sample_weights = self._weight_grid.reshape(-1)
-            self.weight_cross_sections = {'x': self._weight_grid[self._weight_grid.shape[0]//2,:],
-                                          'y': self._weight_grid[:,self._weight_grid.shape[1]//2]}
+        # SET UP TRAINING DATA, input output xy pairs, xy limits        
+        self.aspect = self.image.shape[1] / self.image.shape[0]
+        if self.aspect > 1.0:
+            self.xlim = -1.0, 1.0
+            self.ylim = -1.0 / self.aspect, 1.0 / self.aspect
         else:
-            logging.info("Not using weighted samples.")
-            self._sample_weights = None
-        logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f], %i samples total." %
-                     (grid_shape, input[:, 0].min(), input[:, 0].max(), input[:, 1].min(), input[:, 1].max(), input.shape[0]))
-        self._input, self._output = input, output
-        return input, output
+            self.ylim = -1.0, 1.0
+            self.xlim = -1.0 * self.aspect, 1.0 * self.aspect
+        self.input_shape = image.shape[:2]
+        x_grid, y_grid = make_input_grid(self.input_shape, keep_aspect=True)
+        self.input_xy = np.stack((x_grid.flatten(), y_grid.flatten()), axis=1)
+        self.image_norm = self.image.astype(np.float32) / 255.0 if self.image.dtype == np.uint8 else self.image.astype(np.float32)
+        self._sample_in, self._sample_out, _ = self._sample_training_input(n_train=0)  # for loss calc
+        if self._center_weight_params is not None:
+            self.sample_weights = make_central_weights(img_size_wh=self.input_shape[::-1], 
+                                                        **self._center_weight_params)
+            logging.info("Made pixel weight mask (%s), with weights spanning range: %.3f to %.3f" % (self.sample_weights.shape,
+                                                                                                     self.sample_weights.min(),
+                                                                                                     self.sample_weights.max()))
+
+
+    def _sample_training_input(self,n_train, sample_weights=None):
+        """ 
+        For whole image (n_train=0), return all pixel coords in random order.
+        For n_train>0, return n_train random (x,y) coords in the image bounds,
+        """
+        
+        if n_train == 0:
+            input = self.input_xy
+            r = self.image_norm[:,:,0].flatten()
+            g = self.image_norm[:,:,1].flatten()
+            b = self.image_norm[:,:,2].flatten()
+            output = np.vstack((r,g,b)).T
+            order = np.random.permutation(input.shape[0])
+            
+            if sample_weights is not None:
+                sample_weights = sample_weights.flatten()[order]
+            input = input[order]
+            output = output[order]
+
+        else:
+            x = np.random.uniform(self.xlim[0], self.xlim[1], size=(n_train,1))
+            y = np.random.uniform(self.ylim[0], self.ylim[1], size=(n_train,1))
+            x_pixel = ((x - self.xlim[0]) / (self.xlim[1] - self.xlim[0]) * (self.input_shape[1]-1))
+            y_pixel = ((y - self.ylim[0]) / (self.ylim[1] - self.ylim[0]) * (self.input_shape[0]-1))
+
+            input = np.hstack((x,y))
+            
+            
+            r = ndimage.map_coordinates(self.image_norm[:,:,0], [y_pixel.flatten(), x_pixel.flatten()], order=1)
+            g = ndimage.map_coordinates(self.image_norm[:,:,1], [y_pixel.flatten(), x_pixel.flatten()], order=1)
+            b = ndimage.map_coordinates(self.image_norm[:,:,2], [y_pixel.flatten(), x_pixel.flatten()], order=1)
+            output = np.vstack((r,g,b)).T
+            
+            if sample_weights is not None:
+                # TODO: interpolate weights instead of nearest neighbor
+                x_idx = np.clip(np.round(x_pixel).astype(int), 0, self.input_shape[1]-1)
+                y_idx = np.clip(np.round(y_pixel).astype(int), 0, self.input_shape[0]-1)
+                sample_weights = sample_weights[y_idx, x_idx].flatten()
+            
+        
+        # input = poly_expand_features(input, self.order)      # TODO!
+        return input, output, sample_weights
     
     def get_div_params(self):
         """
@@ -309,7 +324,7 @@ class NNetImage(object):
         :param orig_aspect: assume coords are bounded on the narrower dimension
            to use the training image's aspect ratio, otherwise assume square
         """
-        w, h = self.image_train.shape[1], self.image_train.shape[0]
+        w, h = self.image.shape[1], self.image.shape[0]
 
         if orig_aspect:
             # unscale to unit square
@@ -336,7 +351,7 @@ class NNetImage(object):
         :param orig_aspect: assume coords are bounded on the narrower dimension
            to use the training image's aspect ratio, otherwise assume square
         """
-        w, h = self.image_train.shape[1], self.image_train.shape[0]
+        w, h = self.image.shape[1], self.image.shape[0]
 
         if orig_aspect:
             # unscale to unit square
@@ -365,7 +380,7 @@ class NNetImage(object):
             (-a-margin, a+margin)) on the smaller, where a is min(aspect, 1/aspect)
         """
         
-        aspect_ratio = self.image_train.shape[1] / self.image_train.shape[0]
+        aspect_ratio = self.image.shape[1] / self.image.shape[0]
         if aspect_ratio > 1:
              x_lim = (-1.0, 1.0)
              y_lim = (-1/aspect_ratio, 1/aspect_ratio)
@@ -579,8 +594,8 @@ class NNetImage(object):
     def get_unweighted_loss(self):
         if self.dry_run:
             logging.info("Dry run, skipping loss computation")
-            return -1.23456
-        loss = self._model.evaluate(self._input, self._output, batch_size=8192, verbose=0)
+            return -0.123456
+        loss = self._model.evaluate(self._sample_in, self._sample_out, batch_size=32768, verbose=0)
         logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
         return loss
 
@@ -589,10 +604,13 @@ class NNetImage(object):
         if learning_rate is not None and learning_rate != self._learning_rate:
             self._optimizer.update_learning_rate(learning_rate)
 
-        input, output = self._input, self._output
-
+        input, output, sample_weights = self._sample_training_input(n_train=self.n_train, sample_weights=self.sample_weights)
+        
+        
+        
+        
         # Save numpy training set:
-        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
+        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image.shape)
         self.anneal_temp = noise_temps[0] if noise_temps is not None else 0.0
         if noise_temps is not None:
             # Langevin dynamics noise:
@@ -600,17 +618,10 @@ class NNetImage(object):
         else:
             noise_sds = np.array([0.0])
 
-        rand = np.random.permutation(input.shape[0])
-        input = input[rand]
-        output = output[rand]
-        n_train_samples = input.shape[0]
-        # Apply the same permutation to sample weights to keep them aligned with input/output
-        sample_weights = self._sample_weights[rand] if self._sample_weights is not None else None
-        
         batch_losses = BatchLossCallback(dry_run=self.dry_run,
                                          n_epochs=epochs,
                                          noise_sds=noise_sds, 
-                                         n_train=n_train_samples,
+                                         n_train=input.shape[0],
                                          batch_size=self.batch_size, 
                                          anneal_temps=noise_temps)
         
@@ -742,9 +753,8 @@ class NNetImage(object):
         weights = self._model.get_weights()
         logging.info("Saving model weights with %i layers to:  %s" % (len(weights), model_filename))
         data = {'weights': weights,
-                'image_raw': self.image_raw,
+                'image': self.image,
                 'cycle': self.cycle,
-                'downscale': self._downscale,
                 'n_div': self.n_div,
                 'n_structure': self.n_structure,
                 'n_hidden': self.n_hidden,

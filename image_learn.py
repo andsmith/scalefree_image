@@ -17,7 +17,7 @@ import cv2
 import time
 import os
 import logging
-from util import make_input_grid, downscale_image, make_central_weights, fade
+from util import make_input_grid, make_central_weights, fade
 import argparse
 from threading import Thread, Lock
 from circular import CircleLayer
@@ -47,7 +47,7 @@ class UIDisplay(object):
     # Variables possible for kwargs, use these defaults if missing from kwargs
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
-                 epochs_per_cycle=1, display_multiplier=1.0, downscale=1.0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=1.0, learning_rate_final=None, nogui=False, 
+                 epochs_per_cycle=1, display_multiplier=1.0, n_train=0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=1.0, learning_rate_final=None, nogui=False, 
                  synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, dry_run=False, **kwargs):
         self._verbose = verbose
         self._border = border
@@ -65,7 +65,7 @@ class UIDisplay(object):
         self._cycle = 0  # epochs_per_cycle epochs of training and an output update increments this
         self._annotate = False
         self._learn_rate = learning_rate  # updates as we anneal
-        self._downscale = downscale  # constant downscale factor for training image
+        self._n_train = n_train  # number of training samples (0 = use all pixels in image)
         self._learning_rate_init = learning_rate
         self._learning_rate_final = learning_rate_final
         self._output_image = None
@@ -105,9 +105,13 @@ class UIDisplay(object):
         self._image_raw, self._file_prefix = self._set_image(image_file, synth_image_name)
 
         self._sim = NNetImage(n_div=self.n_div, n_hidden=n_hidden, n_structure=n_structure, learning_rate_initial=self._learn_rate,
-                        batch_size=self._batch_size, state_file=state_file, image_raw=self._image_raw, line_params=self._line_params,
-                        downscale=self._downscale, center_weight_params=self._center_weight_params, dry_run=dry_run,**kwargs)
+                        batch_size=self._batch_size, state_file=state_file, image=self._image_raw, line_params=self._line_params,
+                        n_train=self._n_train, center_weight_params=self._center_weight_params, dry_run=dry_run,**kwargs)
 
+        if self._frame_dir is not None:
+            if not os.path.exists(self._frame_dir):
+                os.makedirs(self._frame_dir)
+                logging.info("Created frame directory:  %s" % (self._frame_dir,))
         # Check for metadata file
         if state_file is not None:
             meta_filename = self.get_filename('metadata')
@@ -200,7 +204,7 @@ class UIDisplay(object):
         elif which == 'single-image':
             return "%s_single_%s.png" % (self._file_prefix, self._get_arch_str())
         elif which == 'train-image':
-            return "%s_train_%s_downscale=%.1f.png" % (self._file_prefix, self._get_arch_str(), self._downscale)
+            return "%s_train_%s.png" % (self._file_prefix, self._get_arch_str())
         elif which == 'metadata':
             return "%s_metadata_%s.json" % (self._file_prefix, self._get_arch_str())
         else:
@@ -214,7 +218,7 @@ class UIDisplay(object):
             file_path = os.path.join(self._frame_dir, filename)
         else:
             file_path = filename
-        train_img = self._sim.image_train
+        train_img = self._sim.image
         cv2.imwrite(file_path, train_img[:, :, ::-1])
         logging.info("Wrote training image:  %s" % (file_path,))
         return file_path
@@ -307,13 +311,13 @@ class UIDisplay(object):
             self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss_uw, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
-            out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
+            out_path = filename if self._frame_dir is None else os.path.join(self._frame_dir, filename)
             
             if not self._dry_run:
                 self._sim.save_state(out_path)
                 logging.info("Saved model state to:  %s" % (out_path,))
             else:
-                time.sleep(1.0)
+                time.sleep(.2)
                 logging.info("Dry run mode, not saving model state.")
                 
             if self._shutdown:
@@ -342,7 +346,7 @@ class UIDisplay(object):
         
         
         if shape is None:
-            train_shape = self._sim.image_train.shape
+            train_shape = self._sim.image.shape
             shape = (np.array(train_shape[:2]) * self._display_multiplier).astype(int)
             
         if self._dry_run:
@@ -369,9 +373,6 @@ class UIDisplay(object):
         out_path = None
         
         if self._frame_dir is not None:
-            if not os.path.exists(self._frame_dir):
-                os.makedirs(self._frame_dir)
-                logging.info("Created frame directory:  %s" % (self._frame_dir,))
             out_filename = self.get_filename('frame')
             out_path = os.path.join(self._frame_dir, out_filename)
             if os.path.exists(out_path):
@@ -395,7 +396,6 @@ class UIDisplay(object):
         metadata = {'frames': deepcopy(self._metadata),
                     'model_file': self.get_filename('model'),
                     'train_image_file': self._train_img_filename,
-                    'train_downscale': self._downscale,
                     'loss_history': self._loss_history,
                     'learning_rate_history': self._l_rate_history,
                     'anneal_history': self._anneal_history}
@@ -435,7 +435,7 @@ class UIDisplay(object):
             logging.info("Unassigned key: %s" % (event.key,))
         
     def get_train_image(self):
-        return self._sim.image_train
+        return self._sim.image
 
     def run(self, debug_epochs_nothread=-1):
         """
@@ -469,7 +469,7 @@ class UIDisplay(object):
                 self._worker.join()
             return self.final_loss, self._output_image
 
-        while self._sim.image_train is None:
+        while self._sim.image is None:
             time.sleep(0.05)
 
         plt.ion()            
@@ -567,11 +567,11 @@ class UIDisplay(object):
         
         
         # Just draw training image once:
-        img_out = self._sim.image_train.copy()
-        if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
+        img_out = self._sim.image.copy()
+        if self._center_weight_params is not None and self._sim.sample_weights is not None and self._show_weight_contours:
             # apply contour lines at 20% intervals
             n_cont = 7
-            contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
+            contour_levels = [measure.find_contours(self._sim.sample_weights,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
             colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
             for level_ind, contours in enumerate(contour_levels):
                 for contour in contours:
@@ -581,7 +581,7 @@ class UIDisplay(object):
         artists['train_img'] = train_ax.imshow(img_out)
         train_ax.set_anchor('C')
 
-        train_h, train_w = self._sim.image_train.shape[:2]
+        train_h, train_w = self._sim.image.shape[:2]
         box_aspect = (train_h / float(train_w)) if train_w else 1.0
         if hasattr(train_ax, "set_box_aspect"):
             train_ax.set_box_aspect(box_aspect)
@@ -601,7 +601,7 @@ class UIDisplay(object):
                 if self._center_weight_params is not None else ""
             train_ax.set_title("Training cycle %i/%s, target image %i x %i%s" %
                 (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
-                    self._sim.image_train.shape[1], self._sim.image_train.shape[0], cmd))
+                    self._sim.image.shape[1], self._sim.image.shape[0], cmd))
             
             loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)" % (  self._batch_size), fontsize=12)
             if anneal_ax is not None:
@@ -806,34 +806,25 @@ def get_args():
     parser.add_argument("-lp", "--lines_params", help="specify 2 or 3. (2 means lines are parameterized by angle and distance from origin,"+
                                                      "3 means lines are parameterized by angle and intercept / center point).", type=int, default=3)
     parser.add_argument("-s", "--sigmoids", help="Number of sigmoid division units.", type=int, default=0)
-    parser.add_argument("-t", "--structure_units", help="Size of structure layer (before color layer), default 0 (no structure layer)"
-                        , type=int, default=0)
+    parser.add_argument("-t", "--structure_units", help="Size of structure layer (before color layer), default 0 (no structure layer)", type=int, default=0)
     parser.add_argument("-n", "--n_hidden", help="Number of hidden_units units in the model.", type=int, default=64)
     parser.add_argument("-m", "--model_file", help="model to load & continue.", type=str, default=None)
-    parser.add_argument("-j", "--just_image", help="Just generate an an image (use with -m to"+
-                        "generate a high-res image from a trained model)", type=str, default=None)
+    parser.add_argument("-j", "--just_image", help="Just generate an an image (use with -m to" + "generate a high-res image from a trained model)", type=str, default=None)
     parser.add_argument("-e", "--epochs_per_cycle", help="Number of epochs between frames.", type=int, default=1)
-    parser.add_argument(
-        '-k', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
-    parser.add_argument("-x", "--disp_mult",
-                        help="Display image dimension multiplier (X training image size).", type=float, default=1.0)
-    parser.add_argument(
-        "-b", "--border", help="Extrapolate outward from the original shape by this factor.", type=float, default=0.0)
-    parser.add_argument(
-        "-p", "--downscale", help="downscale image by this factor, speeds up training at the cost of detail.", type=float, default=1.0)
+    parser.add_argument('-k', '--cycles', help="Number of training cycles to do (epochs_per_cycle epochs each). 0 = run forever.", type=int, default=0)
+    parser.add_argument("-x", "--disp_mult",help="Display image dimension multiplier (X training image size).", type=float, default=1.0)
+    parser.add_argument("-b", "--border", help="Extrapolate outward from the original shape by this factor.", type=float, default=0.0)
+    parser.add_argument("-q", "--n_train", help="Number of random xy sample points (or 0 to use pixel coords/whole image)", type=int, default=0)
     parser.add_argument('-r', "--learning_rate", help="Learning rate for the optimizer.", type=float, default=1.0)
-    parser.add_argument('-a', "--learning_rate_final",
-                        help="Reduce by multiplicative constant over <cycles> cycles.", type=float, default=None)
+    parser.add_argument('-a', "--learning_rate_final",help="Reduce by multiplicative constant over <cycles> cycles.", type=float, default=None)
     parser.add_argument("--sharpness", help="Sharpness constant for activation function, " +
                         "activation(excitation) = tanh(excitation*sharpness).", type=float, default=1000.0)
     parser.add_argument('--gradient_sharpness', help="Use false gradient with this sharpness (tanh(grad_sharp * cos_theta)) instead of actual" +
                         " (very flat) gradient.  High values result in divider units not moving very much, too low" +
                         " and they don't settle.", type=float, default=2.0)
-    parser.add_argument('-f', '--save_frames',
-                        help="Save frames during training to this directory (must exist).", type=str, default=None)
-    parser.add_argument("-w", "--weigh_center", 
-                        help="Weigh pixels nearer the center higher during training by this r_inner, r_outer, lr_max, and x, y offsets.",
-                        nargs=5, type=float, default=[])
+    parser.add_argument('-f', '--save_frames', help="Save frames during training to this directory (must exist).", type=str, default=None)
+    parser.add_argument("-w", "--weigh_center", help="Weigh pixels nearer the center higher during training by this r_inner, r_outer, lr_max, and x, y offsets.",
+                                                nargs=5, type=float, default=[])
     parser.add_argument("--nogui", help="No GUI, just run training to completion.", action='store_true', default=False)
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parser.add_argument('-d', '--render_dividers', type=int, nargs=4, default=None, 
@@ -881,7 +872,7 @@ def get_args():
     
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight, 'dry_run': parsed.dry_run,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
-              'downscale': parsed.downscale, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,
+              'n_train': parsed.n_train, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,
               'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final, 'anneal_args': parsed.anneal}
     print(parsed.anneal)

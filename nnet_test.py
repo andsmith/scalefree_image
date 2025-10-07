@@ -168,6 +168,7 @@ class ScaleFreeImage(object):
 
 
     def _output_vec_to_image(self, output_vec, img_shape):
+        output_vec = np.clip(output_vec, 0.0, 1.0)
         if img_shape[2] == 1:
             img = output_vec.reshape((img_shape[0], img_shape[1]))
             img = np.clip(img*255.0, 0, 255).astype(np.uint8)
@@ -288,7 +289,6 @@ class ScaleFreeImage(object):
             cycle_info= {'losses': loss_tracker.losses,'learning_rate': self.learning_rate}    
             # RECOMPUTE OUTPUT IMAGE:
 
-            output_pred = self._model.predict(self._output_xy_poly, verbose=verbose, batch_size=32768)
             # SAVE STATE:
             end_time = time.time()
             cycle_time = end_time - start_time
@@ -297,6 +297,8 @@ class ScaleFreeImage(object):
             logging.info(f"\tCompleted training cycle {self.cycle_ind} in {cycle_time:.2f} seconds.")
 
             frame_name = self._get_filename('frame')
+            output_pred = self._model.predict(self._output_xy_poly, verbose=verbose, batch_size=32768)
+
             output_image = self._output_vec_to_image(output_pred, self.output_shape)
             cv2.imwrite(frame_name, output_image)
             

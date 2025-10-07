@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 import os
 import logging
-from util import make_input_grid, downscale_image, make_central_weights
+from util import make_input_grid, make_central_weights
 from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
@@ -145,10 +145,10 @@ class NNetImage(object):
         
         self._init(*args, **kwargs)
         
-    def _init(self, image_raw, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
-                 learning_rate_initial=1.0, downscale=1.0, center_weight_params=None, line_params=3, dry_run=False, **kwargs):
+    def _init(self, image, n_hidden, n_structure, n_div, state_file=None, batch_size=64, sharpness=1000.0, grad_sharpness=3.0, 
+                 learning_rate_initial=1.0, n_train=0, center_weight_params=None, line_params=3, dry_run=False, **kwargs):
         """
-        :param image_raw: a HxWx3 or HxW numpy array containing the target image.  Training will be wrt downsampled versions of this image.
+        :param image: a HxWx3 or HxW numpy array containing the target image.  Training will be on this image.
         :param n_hidden: number of hidden units in the middle
         :param n_structure: number of structure units
         :param n_div: dictionary containing the number of input units for each division type
@@ -159,11 +159,11 @@ class NNetImage(object):
         :param sharpness: sharpness constant for activation function, e.g. f(x) = tanh(x*sharpness) for linear
         :param grad_sharpness: sharpness constant for gradient of activation function, e.g. f'(x) = sharpness * sech^2(x*sharpness)
         :param learning_rate_initial: initial learning rate for Adadelta optimizer
-        :param downscale: downscale factor for training image (1.0 = full size, 0.5 = half size, etc)
+        :param n_train: number of training samples to use (0 = all pixel xy positions, else sample this many random positions)
         :param center_weight_params: if not None, a dict with keys: 'r_inner' (float), 'r_outer' (float), 'w_max' (float), and 'xy_offset' (tuple of floats)
         :param line_params: 2 or 3, parameterization of line units (2 = angle + offset, 3 = angle + center + offset)
         """
-        self.image_raw = image_raw
+        self.image = image
         self._line_params = line_params
         self.n_hidden = n_hidden
         self.n_div = n_div
@@ -171,8 +171,7 @@ class NNetImage(object):
         self.batch_size = batch_size
         self.grad_sharpness = grad_sharpness
         self.dry_run = dry_run
-        self.image_train = None
-        self._downscale = downscale
+        self._n_train = n_train
         self._sample_weights = None
         self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
@@ -197,24 +196,31 @@ class NNetImage(object):
             # (so they can be None in the args)
             state = NNetImage._load_state(state_file)
             weights = state['weights']
-            self.cycle, self.image_raw, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness, self._downscale = \
-                state['cycle'], state['image_raw'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness'], state['downscale']
-            # Checks
-            if image_raw is not None and image_raw.shape != self.image_raw.shape:
-                logging.warning("Image shape doesn't match loaded state:  %s vs %s, using CMD-line argument (will save with this one too)" %
-                                (image_raw.shape, self.image_raw.shape))
-                self.image_raw = image_raw
+            self.cycle, self.image, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness = \
+                state['cycle'], state['image'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness']                
                 
-            if self._downscale != downscale:
-                logging.info("Warning: Command-line is overriding model's downscale factor:  was %.3f, using %.3f" %
-                                (self._downscale, downscale))
-                self._downscale = downscale
+            # Checks & overrides between command line args and state file
+            if image is not None and (image.shape != self.image.shape or not np.allclose(image, self.image)):
+                logging.warning("This appears to be a new image.  Things might get weird...")
+                self.image = image
+            if n_train != self.n_train:
+                logging.info("Using New Number of Training samples from state file:  %d" % (n_train,))
+                self.n_train = n_train
+            if grad_sharpness != self.grad_sharpness:
+                logging.info("Using New Gradient Sharpness from state file:  %d" % (grad_sharpness,))
+                self.grad_sharpness = grad_sharpness
+            if self.n_hidden!= n_hidden:
+                logging.warning("Number of hidden units in state file (%d) does not match argument (%d), using state file." % (self.n_hidden, n_hidden))
+            if self.n_structure != n_structure:
+                logging.warning("Number of structure units in state file (%d) does not match argument (%d), using state file." % (self.n_structure, n_structure))
+            if self.n_div['linear'] != n_div.get('linear', 0) or self.n_div['circular'] != n_div.get('circular', 0) or self.n_div['sigmoid'] != n_div.get('sigmoid', 0):
+                logging.warning("Number each division unit type in state file (%s) does not match argument (%s), using state file." % (self.n_div, n_div))
         else:
+                
             weights = None
             
         # Cache this
-        self._last_downscale = None
-        self._input, self._output = self._make_train(self._downscale)
+        self._input, self._output = self._make_train()
 
 
         self._model = self._init_model()
@@ -243,25 +249,17 @@ class NNetImage(object):
 
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
-    def _make_train(self, downscale, keep_aspect=True):
-        
-        if self._last_downscale is not None and self._last_downscale == downscale:
-            return self._input, self._output
-        self._last_downscale = downscale
+    def _make_train(self, keep_aspect=True):
 
-        self._downscale_level = downscale
-        self.image_train = downscale_image(self.image_raw, self._downscale_level)
-        
-
-        in_x, in_y = make_input_grid(self.image_train.shape, keep_aspect=keep_aspect)
+        in_x, in_y = make_input_grid(self.image.shape, keep_aspect=keep_aspect)
 
         grid_shape = in_x.shape
         input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
-        r, g, b = cv2.split(self.image_train / 255.0)
+        r, g, b = cv2.split(self.image / 255.0)
         output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
         
         if self._center_weight_params is not None:
-            train_img_size_wh = self.image_train.shape[1], self.image_train.shape[0]
+            train_img_size_wh = self.image.shape[1], self.image.shape[0]
             self._weight_grid = make_central_weights(train_img_size_wh, **self._center_weight_params)
             logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
                          (self._center_weight_params['w_max'], self._center_weight_params['r_inner'], train_img_size_wh))
@@ -309,7 +307,7 @@ class NNetImage(object):
         :param orig_aspect: assume coords are bounded on the narrower dimension
            to use the training image's aspect ratio, otherwise assume square
         """
-        w, h = self.image_train.shape[1], self.image_train.shape[0]
+        w, h = self.image.shape[1], self.image.shape[0]
 
         if orig_aspect:
             # unscale to unit square
@@ -336,7 +334,7 @@ class NNetImage(object):
         :param orig_aspect: assume coords are bounded on the narrower dimension
            to use the training image's aspect ratio, otherwise assume square
         """
-        w, h = self.image_train.shape[1], self.image_train.shape[0]
+        w, h = self.image.shape[1], self.image.shape[0]
 
         if orig_aspect:
             # unscale to unit square
@@ -364,8 +362,8 @@ class NNetImage(object):
         :param margin: The x and y limits will be [-1, +1] on the larger dimension,
             (-a-margin, a+margin)) on the smaller, where a is min(aspect, 1/aspect)
         """
-        
-        aspect_ratio = self.image_train.shape[1] / self.image_train.shape[0]
+
+        aspect_ratio = self.image.shape[1] / self.image.shape[0]
         if aspect_ratio > 1:
              x_lim = (-1.0, 1.0)
              y_lim = (-1/aspect_ratio, 1/aspect_ratio)
@@ -592,7 +590,7 @@ class NNetImage(object):
         input, output = self._input, self._output
 
         # Save numpy training set:
-        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image_train.shape)
+        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image.shape)
         self.anneal_temp = noise_temps[0] if noise_temps is not None else 0.0
         if noise_temps is not None:
             # Langevin dynamics noise:
@@ -742,9 +740,9 @@ class NNetImage(object):
         weights = self._model.get_weights()
         logging.info("Saving model weights with %i layers to:  %s" % (len(weights), model_filename))
         data = {'weights': weights,
-                'image_raw': self.image_raw,
+                'image': self.image,
                 'cycle': self.cycle,
-                'downscale': self._downscale,
+                'n_train': self._n_train,
                 'n_div': self.n_div,
                 'n_structure': self.n_structure,
                 'n_hidden': self.n_hidden,
@@ -841,7 +839,7 @@ def test_vertical():
             'n_div': {'linear': 64, 'circular': 0, 'sigmoid': 0}, 
               'n_hidden': 64, 'n_structure': 255,
               'display_multiplier': 6,
-              'downscale': 3.0,
+              'n_train': 0,
               'center_weight_params': barn_weights,    
               'learning_rate': 1.0, 
               #'learning_rate_final': 0.0001,  # run_cycles must be > 0 for this to be used

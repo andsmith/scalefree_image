@@ -203,9 +203,6 @@ class NNetImage(object):
             if image is not None and (image.shape != self.image.shape or not np.allclose(image, self.image)):
                 logging.warning("This appears to be a new image.  Things might get weird...")
                 self.image = image
-            if n_train != self.n_train:
-                logging.info("Using New Number of Training samples from state file:  %d" % (n_train,))
-                self.n_train = n_train
             if grad_sharpness != self.grad_sharpness:
                 logging.info("Using New Gradient Sharpness from state file:  %d" % (grad_sharpness,))
                 self.grad_sharpness = grad_sharpness

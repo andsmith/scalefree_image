@@ -3,10 +3,6 @@ import time
 import tensorflow as tf
 import tempfile
 import shutil
-try:
-    import cPickle as cp
-except ImportError:
-    import pickle as cp
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
@@ -307,7 +303,7 @@ class UIDisplay(object):
             self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss_uw, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
-            out_path = filename  # Just write to cwd instead of os.path.join(img_dir, filename)
+            out_path = filename if self._frame_dir is None else os.path.join(self._frame_dir, filename)
             
             if not self._dry_run:
                 self._sim.save_state(out_path)

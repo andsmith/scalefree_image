@@ -244,7 +244,7 @@ class UIDisplay(object):
         
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
-            cur_loss_uw = self._sim.get_unweighted_loss()
+            cur_loss_uw = self._sim.get_loss(weighted=False)
             frame_name = self._write_frame(self._output_image)  # Create & save image
             init_meta = {'cycle': self._sim.cycle,
                          'learning_rate': self._learn_rate,
@@ -282,7 +282,7 @@ class UIDisplay(object):
                                               learning_rate=self._learn_rate,
                                               verbose=self._verbose, 
                                               noise_temps=anneal_temps)
-            cur_loss_uw = self._sim.get_unweighted_loss()
+            cur_loss_uw = self._sim.get_loss(weighted=False)
             last_epoch_mean_loss = np.mean(new_losses[-1]) if len(new_losses) > 0 else -1
             output_image = self._gen_image()
             
@@ -409,6 +409,8 @@ class UIDisplay(object):
         if event.key == 'x' or event.key == 'escape' or event.key == 'q':
             logging.info("Shutdown requested, waiting for worker to finish...")
             self._shutdown = True
+        elif event.key == 't':
+            plt.tight_layout()
         elif event.key =='d':
             # toggle annotation of divider units
             self._show_dividers = not self._show_dividers
@@ -433,7 +435,7 @@ class UIDisplay(object):
     def get_train_image(self):
         return self._sim.image
 
-    def run(self, debug_epochs_nothread=-1):
+    def run(self, debug_epochs_nothread=-1):  # set -1 for regular operation
         """
         Run as interactive matplotlib window, updating when new image is available.
            * left is the current training image
@@ -535,11 +537,11 @@ class UIDisplay(object):
         if anneal_ax is not None:
             anneal_ax.grid(which='major', axis='both')
             anneal_ax.set_ylabel("Temp", fontsize=8)
-            anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=10)
+            anneal_ax.set_title("Annealing Temp:  %.6f" % (0,), fontsize=10)
 
         lrate_ax.set_ylabel("")  # Learning Rate")
         lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
-        lrate_title += "\nCurrent Annealing Temp:  %.6f" % (self._sim.anneal_temp,) if self._sim.anneal_temp > 0 else ""
+        lrate_title += "\nCurrent Annealing Temp:  %.6f" % (0,)
         lrate_ax.set_title(lrate_title, fontsize=12)
         lrate_ax.set_yscale('log')
         
@@ -564,11 +566,11 @@ class UIDisplay(object):
         
         # Just draw training image once:
         img_out = self._sim.image.copy()
-        if self._center_weight_params is not None and self._sim._weight_grid is not None and self._show_weight_contours:
+        if self._center_weight_params is not None and self._sim.weight_grid is not None and self._show_weight_contours:
             # apply contour lines at 20% intervals
             n_cont = 7
-            contour_levels = [measure.find_contours(self._sim._weight_grid,level = l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
-            colors = plt.cm.viridis(np.linspace(0,1,len(contour_levels)))[:,:3]
+            contour_levels = [measure.find_contours(self._sim.weight_grid, level=l) for l in np.linspace(1.0, self._center_weight_params['w_max'], n_cont, endpoint=True)[1:]]
+            colors = plt.cm.viridis(np.linspace(0, 1, len(contour_levels)))[:, :3]
             for level_ind, contours in enumerate(contour_levels):
                 for contour in contours:
                     contour = np.round(contour).astype(int)
@@ -601,7 +603,7 @@ class UIDisplay(object):
             
             loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)" % (  self._batch_size), fontsize=12)
             if anneal_ax is not None:
-                anneal_ax.set_title("Annealing Temp:  %.6f" % (self._sim.anneal_temp,), fontsize=12)
+                anneal_ax.set_title("Annealing Temp:  %.6f" % (0,), fontsize=12)
             lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
             lrate_ax.set_title(lrate_title, fontsize=12)
             cmd = "hit 'a' to show last 5 cycles only." if self._show_all_history else "Hit 'a' to show all cycles."
@@ -760,15 +762,15 @@ class UIDisplay(object):
 
             self._update_plots = False
 
-            t0 = time.perf_counter()                
-            plt.tight_layout()
-            tl_times.append(time.perf_counter() - t0)
-            if len(tl_times) % 10 == 0:
-                logging.info("Tight_layout time (last %i iters): min %.3f sec, max %.3f sec, mean %.3f sec" % (len(tl_times), 
-                                                                                                               np.min(tl_times), 
-                                                                                                               np.max(tl_times),
-                                                                                                               np.mean(tl_times)))
-                #tl_times=[]
+            # t0 = time.perf_counter()                
+            
+            # tl_times.append(time.perf_counter() - t0)
+            # if len(tl_times) % 10 == 0:
+            #     logging.info("Tight_layout time (last %i iters): min %.3f sec, max %.3f sec, mean %.3f sec" % (len(tl_times), 
+            #                                                                                                    np.min(tl_times), 
+            #                                                                                                    np.max(tl_times),
+            #                                                                                                    np.mean(tl_times)))
+            #     #tl_times=[]
 
             plt.draw()
             fig.canvas.flush_events()  # Force canvas to update

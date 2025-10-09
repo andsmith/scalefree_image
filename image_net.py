@@ -19,87 +19,66 @@ import matplotlib.pyplot as plt
 
 DIV_TYPES = {'circular': CircleLayer, 'linear': LineLayer, 'sigmoid': NormalLayer}
 import tensorflow as tf
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.utils import Sequence
+import logging
+from scipy import ndimage
 
+logging.basicConfig(level=logging.INFO)
+
+# ================================================================
+# 1️⃣ Define the NoisyOptimizer
+# ================================================================
 class NoisyOptimizer(tf.keras.optimizers.Optimizer):
-    """
-    Wrapper optimizer: adds Gaussian noise to gradients, then delegates to `base_optimizer`.
-    Note: we pass a dummy learning_rate to super().__init__ because the Optimizer base requires it.
-    """
-    def __init__(self, base_optimizer, name="NoisyOpt", **kwargs):
-        # Optimizer base requires a learning_rate argument in many TF versions.
-        # Use a harmless dummy value (we delegate updates to `base_optimizer` anyway).
-        super().__init__(learning_rate=0.0, name=name, **kwargs)
-
+    def __init__(self, base_optimizer, name="NoisyOptimizer", learning_rate_init=0.0, **kwargs):
+        super().__init__(learning_rate=learning_rate_init, name=name, **kwargs)
         self.base = base_optimizer
-        # step counter for indexing sigmas (int64 so it matches many TF counters)
-        self.step = tf.Variable(0, trainable=False, dtype=tf.int64, name="noisy_step")
-        self.sigmas = None  # will hold a 1-D tf.Tensor of sigma values if set
+        self.step = tf.Variable(0, trainable=False, dtype=tf.int64)  # index into sigmas
+        self.sigmas = None
 
-    def set_sigmas(self, sigmas):
-        """Accepts a list/tuple/1D-np-array or 1D-tf.Tensor of stddevs to use per-step.
-        If the step index exceeds the length, the final value will be used (or 0 if not provided)."""
-        self.sigmas = tf.convert_to_tensor(list(sigmas), dtype=tf.float32)
-
-    def _add_noise_to_grad(self, g, sigma):
-        """Add noise while preserving IndexedSlices (for embeddings)."""
-        if g is None:
-            return None
-        if isinstance(g, tf.IndexedSlices):
-            vals = g.values + tf.random.normal(tf.shape(g.values), stddev=sigma)
-            return tf.IndexedSlices(vals, g.indices, g.dense_shape)
+    def reset(self, sigmas):
+        """Set noise schedule (list or tensor)."""
+        if sigmas is None:
+            self.sigmas = None  # Not using noise
         else:
-            return g + tf.random.normal(tf.shape(g), stddev=sigma)
+            self.sigmas = tf.constant(sigmas, dtype=tf.float32)
+        self.step.assign(0)
+        logging.info("NoisyOptimizer reset with %d sigmas." % (0 if self.sigmas is None else len(self.sigmas)))
+
+    def update_learning_rate(self, learning_rate):
+        """Update the wrapped optimizer’s learning rate."""
+        self.base.learning_rate.assign(learning_rate)
+        logging.info("Updated learning rate to: %.6f", float(self.base.learning_rate.numpy()))
+
+    def apply_gradients(self, grads_and_vars, **kwargs):
+        # Determine noise std for this step
         
-            
-    def apply_gradients_new(self, grads_and_vars, name=None, **kwargs):
-        # Determine noise level
-        if self.sigmas is not None and int(self.step) < len(self.sigmas):
-            sigma = self.sigmas[self.step]
-        else:
-            sigma = 0.0
+        sigma = 0.0
 
-        # Add Gaussian noise
-        noisy = [
-            (g + tf.random.normal(tf.shape(g), stddev=sigma) if g is not None else None, v)
-            for g, v in grads_and_vars
-        ]
-
-        # Step bookkeeping
-        self.step.assign_add(1)
-        self.iterations.assign_add(1)
-
-        # ✅ Don't pass 'name' or extra kwargs to base optimizer
-        return self.base.apply_gradients(noisy)
-
-
-
-    def apply_gradients(self, grads_and_vars, name=None, **kwargs):
-        # compute scalar sigma for this step
+        # Select current sigma safely
         if self.sigmas is None:
             sigma = tf.constant(0.0, dtype=tf.float32)
         else:
-            # clamp index so we don't go out of bounds; use last sigma if step >= len(sigmas)
-            idx = tf.cast(self.step, tf.int32)
-            last_idx = tf.maximum(tf.shape(self.sigmas)[0] - 1, 0)
-            idx_clamped = tf.minimum(idx, last_idx)
-            sigma = self.sigmas[idx_clamped]
+            step_index = tf.cast(self.step, tf.int32)
+            num_sigmas = tf.shape(self.sigmas)[0]
+            sigma = tf.cond(
+                step_index < num_sigmas,
+                lambda: self.sigmas[step_index],
+                lambda: tf.constant(0.0, dtype=tf.float32)
+            )
+        # sigma = self.sigmas[self.step] if self.sigmas is not None and self.step < len(self.sigmas) else 0.0
 
-        # add noise to each gradient (properly handling None and IndexedSlices)
-        noisy = []
-        for g, v in grads_and_vars:
-            noisy_g = self._add_noise_to_grad(g, sigma) if g is not None else None
-            noisy.append((noisy_g, v))
-
-        # increment counters
-        # (self.iterations is provided by the Optimizer base class)
+        # Add Gaussian noise to gradients
+        
+        noisy = [(g + tf.random.normal(tf.shape(g), stddev=sigma) if g is not None else None, v)
+                 for g, v in grads_and_vars]
+        
         self.step.assign_add(1)
         self.iterations.assign_add(1)
-
-        # delegate the actual update to the wrapped optimizer
-        return self.base.apply_gradients(noisy,**kwargs)
+        return self.base.apply_gradients(noisy, **kwargs)
 
     def get_config(self):
-        # serialize base optimizer and sigmas (if present)
         config = super().get_config()
         config.update({
             "base_optimizer": tf.keras.optimizers.serialize(self.base),
@@ -107,19 +86,173 @@ class NoisyOptimizer(tf.keras.optimizers.Optimizer):
         })
         return config
 
-    @classmethod
-    def from_config(cls, config):
-        base_opt = tf.keras.optimizers.deserialize(config.pop("base_optimizer"))
-        sigmas = config.pop("sigmas", None)
-        obj = cls(base_opt, **config)
-        if sigmas is not None:
-            obj.set_sigmas(sigmas)
-        return obj
 
-    def update_learning_rate(self, learning_rate):
-        self.base.learning_rate.assign(learning_rate)
-        logging.info("Updated learning rate to:  %.6f" % (self.base.learning_rate,))
+# ================================================================
+# 2️⃣ Define a Sequence that resamples data every epoch
+# ================================================================
 
+class ResampleSequence(Sequence):
+    def __init__(self, image_normalized, n_train, batch_size, weight_mask=None, shuffle=True, **kwargs):
+        """
+        
+        
+        :param image_normalized: HxWx3 numpy array with network input image normalized to [0,1] (or whatever network target range is)
+        :param n_train: number of training samples to use (0 = all pixel xy positions, else sample this many random positions)
+        :param batch_size: batch size for training, steps_per_epoch = ceil(n_train / batch_size)
+        :param weight_mask: optional HxW numpy array of weights for each pixel
+        :param shuffle: whether to shuffle the data at the start of each epoch (only relevant if n_train=0)
+        """
+        super().__init__(**kwargs)  
+        self.image = image_normalized.astype(np.float32)
+        self._n_train = n_train
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.weight_mask = weight_mask
+        
+        # For sampling range
+        self.aspect = self.image.shape[1] / self.image.shape[0]
+        if self.aspect>=1.0:
+            self.xlim = (-1.0, 1.0)  # wide image
+            self.ylim = (-1.0/self.aspect, 1.0/self.aspect) 
+        else:
+            self.xlim = (-self.aspect, self.aspect)
+            self.ylim = (-1.0, 1.0)  # tall image
+            
+        # Pre-compute input/output for n_train=0, just reshuffle each epoch
+        x, y = make_input_grid(self.image.shape, keep_aspect=True)
+        self.input_xy_full_image = np.hstack((x.reshape(-1,1), y.reshape(-1,1)))
+        r = self.image[:,:,0].flatten()
+        g = self.image[:,:,1].flatten()
+        b = self.image[:,:,2].flatten()
+        self.output_xy_full_image = np.vstack((r,g,b)).T
+        self.sample_weights_full_image = None if weight_mask is None else weight_mask.flatten()
+        
+        self.input_shape = self.image.shape
+        
+        # Set these each epoch so minibatches can be sliced from them consistently:
+        self.x = None
+        self.y = None
+        self.sample_weight = None
+        
+        self.indices = np.arange(self.get_n_train())    
+        
+        self._resample()
+        n_mini = int(np.ceil(len(self.y) / self.batch_size))
+        logging.info("Initialized ResampleSequence with n_training_samples=%d, batch_size=%d, %d minibatches per epoch." % (
+            len(self.indices),self.batch_size,n_mini))
+
+    def __len__(self):
+        return int(np.ceil(len(self.y) / self.batch_size))
+    
+    def get_n_train(self):
+        if self._n_train==0:
+            return self.image.shape[0] * self.image.shape[1]
+        else:
+            return self._n_train
+
+    def __getitem__(self, idx):
+        i0 = idx * self.batch_size
+        i1 = (idx + 1) * self.batch_size
+        batch_ids = self.indices[i0:i1]
+
+        # slice consistently across x, y, sample_weight
+        x_batch = self.x[batch_ids] if isinstance(self.x, np.ndarray) else [xi[batch_ids] for xi in self.x]
+        y_batch = self.y[batch_ids]
+        if self.sample_weight is not None:
+            sw_batch = self.sample_weight[batch_ids]
+            return x_batch, y_batch, sw_batch
+        else:
+            return x_batch, y_batch
+
+    def _resample(self):
+        
+        
+        if self._n_train == 0:
+            # Use all pixels, just reshuffle order
+            if self.shuffle:
+                logging.info("Shuffling training data for new epoch.")
+                order = np.random.permutation(len(self.input_xy_full_image))
+            else:
+                order = np.arange(len(self.input_xy_full_image))
+                
+            self.x = self.input_xy_full_image[order]
+            self.y = self.output_xy_full_image[order]
+            if self.sample_weights_full_image is not None:
+                self.sample_weight = self.sample_weights_full_image[order]
+            else:
+                self.sample_weight = None
+        else:
+            # Sample random 
+            point_x = np.random.uniform(self.xlim[0], self.xlim[1], size=(self._n_train,1))
+            point_y = np.random.uniform(self.ylim[0], self.ylim[1], size=(self._n_train,1))
+            x_pixel = ((point_x - self.xlim[0]) / (self.xlim[1] - self.xlim[0]) * (self.image.shape[1]-1))
+            y_pixel = ((point_y - self.ylim[0]) / (self.ylim[1] - self.ylim[0]) * (self.image.shape[0]-1))
+
+            input = np.hstack((point_x, point_y))
+            self.x = input.astype(np.float32)
+            
+            r = ndimage.map_coordinates(self.image[:,:,0], [y_pixel.flatten(), x_pixel.flatten()], order=1)
+            g = ndimage.map_coordinates(self.image[:,:,1], [y_pixel.flatten(), x_pixel.flatten()], order=1)
+            b = ndimage.map_coordinates(self.image[:,:,2], [y_pixel.flatten(), x_pixel.flatten()], order=1)
+            output = np.vstack((r,g,b)).T
+            self.y = output.astype(np.float32)
+
+            if self.weight_mask is not None:
+                # TODO: interpolate weights instead of nearest neighbor
+                x_idx = np.clip(np.round(x_pixel).astype(int), 0, self.input_shape[1]-1)
+                y_idx = np.clip(np.round(y_pixel).astype(int), 0, self.input_shape[0]-1)
+                self.sample_weight = self.weight_mask[y_idx, x_idx].flatten()
+            else:
+                self.sample_weight = None
+            # Don't need to shuffle here since we're sampling randomly.
+            logging.info("Resampled %d random training points for new epoch.", self._n_train)
+
+    def on_epoch_end(self):
+        self._resample()
+
+# # ================================================================
+# # 4️⃣ Dummy training data
+# # ================================================================
+# np.random.seed(42)
+# x_train = np.random.rand(1000, 10).astype(np.float32)
+# y_train = (np.sum(x_train, axis=1, keepdims=True) + np.random.randn(1000, 1) * 0.1).astype(np.float32)
+
+# # ================================================================
+# # 5️⃣ Build model and optimizer
+# # ================================================================
+# base_opt = tf.keras.optimizers.Adam(learning_rate=1e-3)
+# opt = NoisyOptimizer(base_opt)
+
+# model = tf.keras.Sequential([
+#     tf.keras.layers.Dense(32, activation='relu', input_shape=(10,)),
+#     tf.keras.layers.Dense(1)
+# ])
+# model.compile(optimizer=opt, loss='mse')
+
+# # ================================================================
+# # 6️⃣ Training setup
+# # ================================================================
+# epochs = 10
+# batch_size = 32
+# num_samples = x_train.shape[0]
+# steps_per_epoch = np.ceil(num_samples / batch_size)
+# total_steps = epochs * steps_per_epoch
+
+# sigmas = np.linspace(0.05, 0.0, total_steps)   # noise annealing
+# lrs = np.linspace(1e-3, 5e-4, epochs)     # learning rate schedule
+
+# train_seq = ResampleSequence(x_train, y_train, batch_size)
+# callbacks = [NoiseAnnealingCallback(sigmas, lrs)]
+
+# # ================================================================
+# # 7️⃣ Train
+# # ================================================================
+# history = model.fit(
+#     train_seq,
+#     epochs=epochs,
+#     callbacks=callbacks,
+#     verbose=1
+# )
 
 class NNetImage(object):
     """
@@ -129,19 +262,20 @@ class NNetImage(object):
     """
 
     def __init__(self, *args, **kwargs):
-        import pprint
-        print("\n\n\n***********************")    
-        print("SCALEFREE INIT ARGS:")
-        pprint.pprint(args)
-        print("\nSCALEFREE INIT KWARGS:")
-        image = None
-        if 'image_raw' in kwargs:
-            image = kwargs['image_raw']
-            kwargs['image_raw'] = "Image:  %s" % (image.shape,)  # avoid printing large image array
-        pprint.pprint(kwargs)
-        if image is not None:
-            kwargs['image_raw'] = image
-        print("***********************\n\n\n")
+        # ### TODO: remove this dummy __init__ to print args/kwargs
+        # import pprint
+        # print("\n\n\n***********************")    
+        # print("SCALEFREE INIT ARGS:")
+        # pprint.pprint(args)
+        # print("\nSCALEFREE INIT KWARGS:")
+        # image = None
+        # if 'image_raw' in kwargs:
+        #     image = kwargs['image_raw']
+        #     kwargs['image_raw'] = "Image:  %s" % (image.shape,)  # avoid printing large image array
+        # pprint.pprint(kwargs)
+        # if image is not None:
+        #     kwargs['image_raw'] = image
+        # print("***********************\n\n\n")
         
         self._init(*args, **kwargs)
         
@@ -168,15 +302,17 @@ class NNetImage(object):
         self.n_hidden = n_hidden
         self.n_div = n_div
         self.n_structure = n_structure
-        self.batch_size = batch_size
+        self._n_train = n_train
+        self.sharpness = sharpness
         self.grad_sharpness = grad_sharpness
         self.dry_run = dry_run
-        self._n_train = n_train
-        self._sample_weights = None
-        self.sharpness = sharpness
         self.cycle = 0  # increment for each call to train_more()
         self._center_weight_params = center_weight_params
-        self._learning_rate = learning_rate_initial
+        self._learning_rate = learning_rate_initial  # or set in call to train_more()
+        self._sample_weights = None  # flat, for calculating loss
+        self.weight_grid = None  # image shaped, for display of contours
+        self.cur_loss = -1
+        
         self._artists = {'circular':{
                             'center_points':[],
                             'curves': []},
@@ -186,16 +322,13 @@ class NNetImage(object):
                          'sigmoid': { 
                              'bands': []},
                          'output_image': None}
-        self.anneal_temp = 0.0
         self._lims_set = False
         
-        self.cur_loss = -1
-
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
             # (so they can be None in the args)
             state = NNetImage._load_state(state_file)
-            weights = state['weights']
+            network_weights = state['weights']
             self.cycle, self.image, self.n_hidden, self.n_structure, self.n_div,  self.sharpness, self.grad_sharpness = \
                 state['cycle'], state['image'], state['n_hidden'], state['n_structure'], state['n_div'], state['sharpness'], state['grad_sharpness']                
                 
@@ -212,18 +345,29 @@ class NNetImage(object):
                 logging.warning("Number of structure units in state file (%d) does not match argument (%d), using state file." % (self.n_structure, n_structure))
             if self.n_div['linear'] != n_div.get('linear', 0) or self.n_div['circular'] != n_div.get('circular', 0) or self.n_div['sigmoid'] != n_div.get('sigmoid', 0):
                 logging.warning("Number each division unit type in state file (%s) does not match argument (%s), using state file." % (self.n_div, n_div))
+                
         else:
                 
-            weights = None
+            network_weights = None
             
-        # Cache this
-        self._input, self._output = self._make_train()
+        # Might have a different image now, finally set these:
+        self.n_input = n_train if n_train < 0 else image.shape[0] * image.shape[1]
+        self.batch_size = batch_size
+        self.minibatches_per_epoch = int(np.ceil(self.n_input / self.batch_size))
+        self.image_size_wh = (self.image.shape[1], self.image.shape[0])  # (w,h)
+        self.weight_grid = make_central_weights(self.image_size_wh, **center_weight_params) if center_weight_params is not None else None
+        self.input_sampler = ResampleSequence(self.image / 255.0, self._n_train, self.batch_size, weight_mask=self.weight_grid)
+        self._input = self.input_sampler.input_xy_full_image  # cache these for loss calculation
+        self._output = self.input_sampler.output_xy_full_image  
+        self._sample_weights = self.input_sampler.sample_weights_full_image  # (report weighted loss too?)
+        
+
 
 
         self._model = self._init_model()
-        if weights is not None:
+        if network_weights is not None:
             logging.info("Restored model weights from file:  %s  (resuming at cycle %i)" % (state_file, self.cycle))
-            self._model.set_weights(weights)
+            self._model.set_weights(network_weights)
         else:
             logging.info("Initialized new model.")
             
@@ -233,7 +377,7 @@ class NNetImage(object):
             learning_rate=1.0, use_ema=False, ema_momentum=0.99
         )
 
-        self._optimizer = NoisyOptimizer(base_optimizer)
+        self._optimizer = NoisyOptimizer(base_optimizer, learning_rate_init=self._learning_rate)
 
         self._model.compile(loss='mean_squared_error', optimizer=self._optimizer)
             
@@ -246,31 +390,6 @@ class NNetImage(object):
 
         logging.info("Model compiled with default learning_rate:  %f" % (self._learning_rate,))
 
-    def _make_train(self, keep_aspect=True):
-
-        in_x, in_y = make_input_grid(self.image.shape, keep_aspect=keep_aspect)
-
-        grid_shape = in_x.shape
-        input = np.hstack((in_x.reshape(-1, 1), in_y.reshape(-1, 1)))
-        r, g, b = cv2.split(self.image / 255.0)
-        output = np.hstack((r.reshape(-1, 1), g.reshape(-1, 1), b.reshape(-1, 1)))
-        
-        if self._center_weight_params is not None:
-            train_img_size_wh = self.image.shape[1], self.image.shape[0]
-            self._weight_grid = make_central_weights(train_img_size_wh, **self._center_weight_params)
-            logging.info("Using center-weighted samples with max weight %.1f and sigma %.3f (image shape: %s)" %
-                         (self._center_weight_params['w_max'], self._center_weight_params['r_inner'], train_img_size_wh))
-            self._sample_weights = self._weight_grid.reshape(-1)
-            self.weight_cross_sections = {'x': self._weight_grid[self._weight_grid.shape[0]//2,:],
-                                          'y': self._weight_grid[:,self._weight_grid.shape[1]//2]}
-        else:
-            logging.info("Not using weighted samples.")
-            self._sample_weights = None
-        logging.info("Made inputs %s spanning [%.3f, %.3f] and [%.3f, %.3f], %i samples total." %
-                     (grid_shape, input[:, 0].min(), input[:, 0].max(), input[:, 1].min(), input[:, 1].max(), input.shape[0]))
-        self._input, self._output = input, output
-        return input, output
-    
     def get_div_params(self):
         """
         Get the parameters of the division units.  For L lines, C circles, and S sigmoids, 
@@ -343,7 +462,6 @@ class NNetImage(object):
         else:
             r_px = radius * 0.5 * min(img_shape[0]-1, img_shape[1]-1)
         return r_px.astype(int)
-
 
     def draw_div_units(self, ax, output_image=None, margin=0.1, plot_units=False, draw_flags=None):
         """
@@ -526,7 +644,6 @@ class NNetImage(object):
             ax.set_xlim(np.array(x_lim))
             ax.set_ylim(np.array(y_lim))
         
-
     def _init_model(self):
         """
         Initialize the TF model, either from scratch.
@@ -571,52 +688,80 @@ class NNetImage(object):
     
         return model
 
-    def get_unweighted_loss(self):
+    def get_loss(self, weighted=False):
         if self.dry_run:
             logging.info("Dry run, skipping loss computation")
             return -1.23456
-        loss = self._model.evaluate(self._input, self._output, batch_size=8192, verbose=0)
-        logging.info("Current loss at cycle %i:  %.6f" % (self.cycle, loss))
+        sample_weights = self._sample_weights if weighted else None
+        loss = self._model.evaluate(self._input, self._output, sample_weight=sample_weights, batch_size=8192, verbose=0)
+        logging.info("Current loss at cycle %i:  %.6f%s" % (self.cycle, loss, (" (weighted)" if weighted else "")))
         return loss
 
-
     def train_more(self, epochs, learning_rate=None, noise_temps=None, verbose=True):
-        if learning_rate is not None and learning_rate != self._learning_rate:
-            self._optimizer.update_learning_rate(learning_rate)
+        """
+        Train for n more epochs (i.e. 1 more cycle).
 
-        input, output = self._input, self._output
+        Learning rate is constant over the cycle.
+        
+        Noise temps can be:
+          * Constant over the cycle, an [epochs]-element list for 
+          * Custom for each epoch: an [epochs]-element list of floats
+          * Custom for each minibatch: an [epochs x minibatches_per_epoch] 2D list / array of floats
+          * 0 or None for no noise
 
-        # Save numpy training set:
-        # np.savez_compressed("training_data.npz", input=input, output=output, img_shape=self.image.shape)
-        self.anneal_temp = noise_temps[0] if noise_temps is not None else 0.0
+        :param epochs: number of epochs to train for
+        :param learning_rate: if not None, update the learning rate to this value   
+        :param noise_temps: see above
+        :param verbose: if True, print progress bar during training
+        
+        """
+        if learning_rate is not None:
+            self._learning_rate = learning_rate
+            self._optimizer.update_learning_rate(self._learning_rate)
+            
+
         if noise_temps is not None:
-            # Langevin dynamics noise:
-            noise_sds = np.sqrt(2 * learning_rate * np.array(noise_temps))
+            # need to expand to single list, one per minibatch
+            if isinstance(noise_temps, (int, float)) and noise_temps >= 0:
+                noise_temps = float(noise_temps)
+                noise_temps = np.ones((epochs, self.minibatches_per_epoch), dtype=np.float32) * noise_temps
+            elif isinstance(noise_temps[0], (int, float)) and len(noise_temps) == epochs:
+                noise_temps = np.array(noise_temps, dtype=np.float32)
+                noise_temps = np.tile(noise_temps.reshape(-1, 1), (1, self.minibatches_per_epoch))
+            elif isinstance(noise_temps, (list, np.ndarray)) and len(noise_temps) == epochs and isinstance(noise_temps[0], (list, np.ndarray)) and \
+                    len(noise_temps[0]) == self.minibatches_per_epoch:
+                noise_temps = np.array(noise_temps, dtype=np.float32)
+            else:
+                raise ValueError("noise_temps must be a non-negative float, an [epochs]-element list, or an [epochs x minibatches_per_epoch] 2D list.")
+            # Set sigmas from temp using Langevin dynamics formula: sigma = sqrt(2 * learning_rate * temp)
+            noise_sigmas = np.sqrt(2.0 * self._learning_rate * noise_temps)
+            noise_sigmas = noise_sigmas.reshape(-1)  # flatten to 1D array for the optimizer
+            logging.info("Using noise sigmas with min %.6f, max %.6f, mean %.6f" % (np.min(noise_sigmas), np.max(noise_sigmas), np.mean(noise_sigmas)))
         else:
-            noise_sds = np.array([0.0])
-
-        rand = np.random.permutation(input.shape[0])
-        input = input[rand]
-        output = output[rand]
-        n_train_samples = input.shape[0]
-        # Apply the same permutation to sample weights to keep them aligned with input/output
-        sample_weights = self._sample_weights[rand] if self._sample_weights is not None else None
+            noise_sigmas = None
+        self._optimizer.reset(noise_sigmas)
         
         batch_losses = BatchLossCallback(dry_run=self.dry_run,
                                          n_epochs=epochs,
-                                         noise_sds=noise_sds, 
-                                         n_train=n_train_samples,
+                                         noise_sds=noise_sigmas,
+                                         n_train=self.input_sampler.get_n_train(),
                                          batch_size=self.batch_size, 
                                          anneal_temps=noise_temps)
         
-        swt = ", sample weight range [%.6f, %.6f]" % (np.min(sample_weights), np.max(sample_weights)) if sample_weights is not None else ""
-        logging.info("... More training with %i epochs%s" % (epochs, swt))
-        
-        self._model.optimizer.set_sigmas(noise_sds)
-        
+
         if not self.dry_run:
-            self._fit(input, output, epochs=epochs, sample_weight=sample_weights,
-                            batch_size=self.batch_size, verbose=verbose, callbacks=[batch_losses])
+            # train_seq = ResampleSequence(x_train, y_train, batch_size)  now self.input_sampler
+            callbacks = [batch_losses]
+
+            hist =  self._model.fit(self.input_sampler,
+                                    epochs=epochs,
+                                    callbacks=callbacks,
+                                    verbose=verbose)
+            # import pprint
+            # print("\n\n\nHistory:")
+            # pprint.pprint(hist.history)
+            # print("\n\n")
+        
         # Get loss for each step
         loss_history = batch_losses.losses
         self.cur_loss = np.mean(loss_history[-1]) if len(loss_history) > 0 else -2
@@ -627,8 +772,6 @@ class NNetImage(object):
         return loss_history
     
     
-    def _fit(self, *args, **kwargs):
-            self._model.fit(*args, **kwargs)
 
     def gen_image(self, output_shape, border=0.0, keep_aspect=True, div_color_f=None, div_thickness=None):
 
@@ -832,26 +975,27 @@ def test_vertical():
     anneal_args = [10.0, 0.001, 1000]
 
     # The rest of the training parameters:
-    kwargs = {'image_raw': cv2.imread(r'input/barn.png'),  
-            'n_div': {'linear': 64, 'circular': 0, 'sigmoid': 0}, 
+    kwargs = {'image': cv2.imread(r'input/barn_small.png'),  
+            'n_div': {'linear': 32, 'circular': 0, 'sigmoid': 0}, 
               'n_hidden': 64, 'n_structure': 255,
               'display_multiplier': 6,
               'n_train': 0,
-              'center_weight_params': barn_weights,    
+              'center_weight_params': None,  # barn_weights,
               'learning_rate': 1.0, 
               #'learning_rate_final': 0.0001,  # run_cycles must be > 0 for this to be used
               #'anneal_args': anneal_args, 
               'nogui': True,
-              'batch_size': 32768,
-              'run_cycles': 1, 'epochs_per_cycle': 10}
+              'batch_size': 32,
+              'run_cycles': 5, 'epochs_per_cycle': 10}
     
     s = NNetImage(**kwargs)
     
     # DO cycles manually here:
     for cycle_ind in range(kwargs['run_cycles']):
+        
         print("Cycle %i/%i -------------------------" % (cycle_ind+1, kwargs['run_cycles']))
         # linearly anneal noise temperature from 10 to 0.01 over the cycles
-        noise_temps = np.linspace(10, .01, kwargs['epochs_per_cycle'])
+        noise_temps = None  # np.linspace(10, .01, kwargs['epochs_per_cycle'])
         # TODO: implement learning rate decay with learning_rate_final argument
         learning_rate = kwargs['learning_rate']
         loss = s.train_more(epochs=kwargs['epochs_per_cycle'], learning_rate=learning_rate, 

@@ -16,6 +16,7 @@ import logging
 from util import make_input_grid, make_central_weights, fade
 import argparse
 from threading import Thread, Lock
+from multiprocessing import Process
 from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
@@ -69,6 +70,8 @@ class UIDisplay(object):
         self._l_rate_history = []
         self._anneal_history = []
         self._hist_lock = Lock()  # for history lists
+        #self._save_lock = Lock()  # for saving metadata
+        self._save_proc = None
         self._batch_size = batch_size
         self._nogui = nogui
         self._metadata = []
@@ -251,6 +254,7 @@ class UIDisplay(object):
                          'current_loss': cur_loss_uw,
                          'filename': frame_name}
             self._metadata.append(init_meta)
+            
             self._write_metadata()
 
         anneal_temp, anneal_decay = 0, 0
@@ -384,20 +388,25 @@ class UIDisplay(object):
         if self._dry_run:
             logging.info("Dry run mode, not writing metadata.")
             return
-
+        if self._save_proc is not None and self._save_proc.is_alive():
+            logging.info("Previous metadata save still in progress, waiting...")
+            self._save_proc.join()
+            logging.info("Previous metadata save finished, starting new save...")
         meta_filename = self.get_filename('metadata')
         meta_path = '.' if self._frame_dir is None else self._frame_dir
         meta_file_path = os.path.join(meta_path, meta_filename)
-        metadata = {'frames': deepcopy(self._metadata),
-                    'model_file': self.get_filename('model'),
-                    'train_image_file': self._train_img_filename,
-                    'n_train': self._n_train,
-                    'loss_history': self._loss_history,
-                    'learning_rate_history': self._l_rate_history,
-                    'anneal_history': self._anneal_history}
-        with open(meta_file_path, 'w') as f:
-            json.dump(metadata, f)
-        logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
+        save_args = {'meta_file_path': meta_file_path,
+                     'metadata': self._metadata,
+                     'model_filename': self.get_filename('model'),
+                     'train_img_filename': self._train_img_filename,
+                     'n_train': self._n_train,
+                     'loss_history': self._loss_history,
+                     'learning_rate_history': self._l_rate_history,
+                     'anneal_history': self._anneal_history}
+
+        self._save_proc = Process(target=save_func, kwargs=save_args)
+        self._save_proc.start()
+        logging.info("Started metadata save process.")
 
     def _start(self):
         
@@ -790,6 +799,18 @@ class UIDisplay(object):
         
         return self.final_loss, self._output_image
 
+def save_func(meta_file_path, metadata, model_filename, train_img_filename, n_train, loss_history, learning_rate_history, anneal_history):
+    logging.info("Save process started...")
+    metadata = {'frames': deepcopy(metadata),
+                'model_file': model_filename,
+                'train_image_file': train_img_filename,
+                'n_train': n_train,
+                'loss_history': loss_history,
+                'learning_rate_history': learning_rate_history,
+                'anneal_history': anneal_history}
+    with open(meta_file_path, 'w') as f:
+        json.dump(metadata, f)
+    logging.info("Wrote METADATA file to --------> :  %s  (save process exiting)." % (meta_file_path,))
 
 def get_args():
     logging.basicConfig(level=logging.INFO)

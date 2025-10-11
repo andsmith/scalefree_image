@@ -45,13 +45,14 @@ class UIDisplay(object):
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
                  epochs_per_cycle=1, display_multiplier=1.0, n_train=0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=1.0, learning_rate_final=None, nogui=False, 
-                 synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, dry_run=False, **kwargs):
+                 synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, dry_run=False, freeze_dividers=False, **kwargs):
         self._verbose = verbose
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_div = n_div
         self.n_hidden = n_hidden
+        self.freeze_dividers = freeze_dividers
         self.n_structure = n_structure
         self._center_weight_params = center_weight_params
         self._update_plots = False
@@ -284,7 +285,7 @@ class UIDisplay(object):
             
             new_losses = self._sim.train_more(self._epochs_per_cycle, 
                                               learning_rate=self._learn_rate,
-                                              verbose=self._verbose, 
+                                              verbose=self._verbose,  freeze_dividers=self.freeze_dividers,
                                               noise_temps=anneal_temps)
             cur_loss_uw = self._sim.get_loss(weighted=False)
             last_epoch_mean_loss = np.mean(new_losses[-1]) if len(new_losses) > 0 else -1
@@ -856,7 +857,7 @@ def get_args():
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parser.add_argument('-d', '--render_dividers', type=int, nargs=4, default=None, 
                     help="Generate output images with division units rendered as lines, params are THICKNESS RED GREEN BLUE (ints)")
-    
+    parser.add_argument("--freeze_dividers", help="Don't move divider units during training.", action='store_true', default=False)
     parser.add_argument('--anneal', type=float, nargs=3, default=None, help="Annealing parameters: [T_init] [T_final/decay] [n_cycles]: "+
                         "where the temperature is exponentially decayed from T_init to T_final over n_cycles (if training for longer, T=0 after n_cycles)." )
     parser.add_argument('--dry_run', action='store_true', help="Run all minibatches/epochs/cycles, but don't do training, just report fake results")
@@ -900,7 +901,7 @@ def get_args():
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight, 'dry_run': parsed.dry_run,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
               'n_train': parsed.n_train, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,
-              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
+              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units, 'freeze_dividers': parsed.freeze_dividers,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final, 'anneal_args': parsed.anneal}
     print(parsed.anneal)
     return parsed, kwargs

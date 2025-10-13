@@ -56,6 +56,8 @@ class ScaleFreeImage(object):
         self.epochs_per_cycle = epochs_per_cycle
         self._input, self._output = None, None  # set before each epoch
         self._update_lock = Lock()
+        self._metadata_save_lock = Lock()
+        self._save_thread = None
         
         self._show_train_img = False  # in GUI show this instead of the latest output image  (Toggle with 'T' key)
         self._show_train_sample_xy = False  # in GUI show the sampled training positions in the image (toggle with 'I' key)
@@ -89,10 +91,10 @@ class ScaleFreeImage(object):
         if name.endswith("_train_image"):
             name = name[:-len("_train_image")]
         return name
-    
-    
-        return os.path.join(self.out_dir, name)
+
     def _write_metadata(self):
+
+        logging.info("Writing training metadata...")
         meta_file = self._get_filename('metadata')
         with open(meta_file, 'w') as f:
             json.dump(self._history, f)
@@ -210,12 +212,28 @@ class ScaleFreeImage(object):
 
 
     def save(self):
-        weights_filename = self._get_filename('weights')
-        weights = self._model.get_weights()
-        np.savez(weights_filename, *weights)
-        logging.info(f"Saved model weights to {weights_filename}")
+        
+        logging.info("Saving model weights and metadata...")
+        
+        if self._save_thread is not None and self._save_thread.is_alive():
+            logging.info("Previous save thread still running, waiting...")
+            self._save_thread.join()
+            logging.info("Previous save thread finished.")
+            self._save_thread = None
+        
+        def save_proc():
+            logging.info("Saving thread begining...")
+            weights_filename = self._get_filename('weights')
+            weights = self._model.get_weights()
+            np.savez(weights_filename, *weights)
+            logging.info(f"Saved model weights to {weights_filename}")
+            self._write_metadata()
+            logging.info("Saving thread exiting.")
+        
+        self._save_thread = Thread(target=save_proc)
+        self._save_thread.start()
+        logging.info("Started metadata save thread.")
 
-        self._write_metadata()
         
         
     def _sample_training_input(self):

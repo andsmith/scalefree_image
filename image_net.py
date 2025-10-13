@@ -615,7 +615,7 @@ class NNetImage(object):
         logging.info("Current loss at cycle %i:  %.6f%s" % (self.cycle, loss, (" (weighted)" if weighted else "")))
         return loss
 
-    def train_more(self, epochs, learning_rate=None, noise_sigmas=None, verbose=True, loss_update_callback=None, param_update_callback=None):
+    def train_more(self, epochs, learning_rate=None, noise_sigmas=None, verbose=True, loss_update_callback=None, param_update_callback=None, freeze_dividers=False):
         """
         Train for n more epochs (i.e. 1 more cycle).
 
@@ -636,6 +636,9 @@ class NNetImage(object):
             self._learning_rate = learning_rate
             self.optimizer.learning_rate.assign(self._learning_rate)
 
+        for layer in self._model.layers:
+            if layer.__class__.__name__ in ['CircleLayer', 'LineLayer', 'NormalLayer']:
+                layer.trainable = not freeze_dividers
         if noise_sigmas is not None:
 
             # need to expand to single list, one per minibatch

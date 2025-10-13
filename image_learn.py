@@ -16,6 +16,7 @@ import logging
 from util import make_input_grid, make_central_weights, fade
 import argparse
 from threading import Thread, Lock
+from multiprocessing import Process
 from circular import CircleLayer
 from linear import LineLayer
 from normal import NormalLayer
@@ -44,13 +45,14 @@ class UIDisplay(object):
 
     def __init__(self, state_file=None, image_file=None, just_image=None, border=0.0, frame_dir=None, run_cycles=0,batch_size=32,center_weight_params=None, line_params=3,
                  epochs_per_cycle=1, display_multiplier=1.0, n_train=0,  n_div={}, n_hidden=40, n_structure=0, learning_rate=1.0, learning_rate_final=None, nogui=False, 
-                 synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, dry_run=False, **kwargs):
+                 synth_image_name = None,verbose=True, div_render_params=None, anneal_args=None, dry_run=False, freeze_dividers=False, **kwargs):
         self._verbose = verbose
         self._border = border
         self._epochs_per_cycle = epochs_per_cycle
         self._display_multiplier = display_multiplier
         self.n_div = n_div
         self.n_hidden = n_hidden
+        self.freeze_dividers = freeze_dividers
         self.n_structure = n_structure
         self._center_weight_params = center_weight_params
         self._update_plots = False
@@ -74,6 +76,8 @@ class UIDisplay(object):
         self._l_rate_history = []
         self._anneal_history = []
         self._hist_lock = Lock()  # for history lists
+        #self._save_lock = Lock()  # for saving metadata
+        self._save_proc = None
         self._batch_size = batch_size
         self._nogui = nogui
         self._metadata = []
@@ -258,6 +262,7 @@ class UIDisplay(object):
                          'filename': frame_name}
             
             self._metadata.append(init_meta)
+            
             self._write_metadata()
 
         anneal_temp, anneal_decay = 0, 0
@@ -296,7 +301,7 @@ class UIDisplay(object):
             
             new_losses = self._sim.train_more(self._epochs_per_cycle, 
                                               learning_rate=self._learn_rate,
-                                              verbose=self._verbose, 
+                                              verbose=self._verbose,  freeze_dividers=self.freeze_dividers,
                                               noise_sigmas=anneal_temps,
                                               loss_update_callback=self._epoch_update,
                                               param_update_callback=self._param_update)
@@ -418,19 +423,25 @@ class UIDisplay(object):
         if self._dry_run:
             logging.info("Dry run mode, not writing metadata.")
             return
-
+        if self._save_proc is not None and self._save_proc.is_alive():
+            logging.info("Previous metadata save still in progress, waiting...")
+            self._save_proc.join()
+            logging.info("Previous metadata save finished, starting new save...")
         meta_filename = self.get_filename('metadata')
         meta_path = '.' if self._frame_dir is None else self._frame_dir
         meta_file_path = os.path.join(meta_path, meta_filename)
-        metadata = {'frames': deepcopy(self._metadata),
-                    'model_file': self.get_filename('model'),
-                    'train_image_file': self._train_img_filename,
-                    'loss_history': self._loss_history,
-                    'learning_rate_history': self._l_rate_history,
-                    'anneal_history': self._anneal_history}
-        with open(meta_file_path, 'w') as f:
-            json.dump(metadata, f)
-        logging.info("Wrote METADATA file to --------> :  %s" % (meta_file_path,))
+        save_args = {'meta_file_path': meta_file_path,
+                     'metadata': self._metadata,
+                     'model_filename': self.get_filename('model'),
+                     'train_img_filename': self._train_img_filename,
+                     'n_train': self._n_train,
+                     'loss_history': self._loss_history,
+                     'learning_rate_history': self._l_rate_history,
+                     'anneal_history': self._anneal_history}
+
+        self._save_proc = Process(target=save_func, kwargs=save_args)
+        self._save_proc.start()
+        logging.info("Started metadata save process.")
 
     def _start(self):
         
@@ -832,6 +843,18 @@ class UIDisplay(object):
         
         return self.final_loss, self._output_image
 
+def save_func(meta_file_path, metadata, model_filename, train_img_filename, n_train, loss_history, learning_rate_history, anneal_history):
+    logging.info("Save process started...")
+    metadata = {'frames': deepcopy(metadata),
+                'model_file': model_filename,
+                'train_image_file': train_img_filename,
+                'n_train': n_train,
+                'loss_history': loss_history,
+                'learning_rate_history': learning_rate_history,
+                'anneal_history': anneal_history}
+    with open(meta_file_path, 'w') as f:
+        json.dump(metadata, f)
+    logging.info("Wrote METADATA file to --------> :  %s  (save process exiting)." % (meta_file_path,))
 
 def get_args():
     logging.basicConfig(level=logging.INFO)
@@ -877,7 +900,7 @@ def get_args():
     parser.add_argument('-z', '--batch_size', help="Training batch size.", type=int, default=32)
     parser.add_argument('-d', '--render_dividers', type=int, nargs=4, default=None, 
                     help="Generate output images with division units rendered as lines, params are THICKNESS RED GREEN BLUE (ints)")
-    
+    parser.add_argument("--freeze_dividers", help="Don't move divider units during training.", action='store_true', default=False)
     parser.add_argument('--anneal', type=float, nargs=3, default=None, help="Annealing parameters: [T_init] [T_final/decay] [n_cycles]: "+
                         "where the temperature is exponentially decayed from T_init to T_final over n_cycles (if training for longer, T=0 after n_cycles)."+
                         "  If n_cycles=0, use the second parameter as the decay factor per epoch (not cycle).  (Noise SD = N(0, T) added to divider unit parameters each step.)")
@@ -922,7 +945,7 @@ def get_args():
     kwargs = {'epochs_per_cycle': parsed.epochs_per_cycle, 'display_multiplier': parsed.disp_mult, 'center_weight_params': center_weight, 'dry_run': parsed.dry_run,
               'border': parsed.border, 'sharpness': parsed.sharpness, 'grad_sharpness': parsed.gradient_sharpness,'line_params': parsed.lines_params,
               'n_train': parsed.n_train, 'n_div': n_div, 'frame_dir': parsed.save_frames, 'batch_size': parsed.batch_size,'div_render_params': div_render,
-              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units,
+              'just_image': parsed.just_image, 'n_hidden': parsed.n_hidden, 'run_cycles': parsed.cycles, 'n_structure': parsed.structure_units, 'freeze_dividers': parsed.freeze_dividers,
               'learning_rate': parsed.learning_rate, 'nogui': parsed.nogui, 'learning_rate_final': parsed.learning_rate_final, 'anneal_args': parsed.anneal}
     print(parsed.anneal)
     return parsed, kwargs

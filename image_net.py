@@ -27,64 +27,34 @@ from scipy import ndimage
 
 logging.basicConfig(level=logging.INFO)
 
-# ================================================================
-# 1️⃣ Define the NoisyOptimizer
-# ================================================================
-class NoisyOptimizer(tf.keras.optimizers.Optimizer):
-    def __init__(self, base_optimizer, name="NoisyOptimizer", learning_rate_init=0.0, **kwargs):
-        super().__init__(learning_rate=learning_rate_init, name=name, **kwargs)
-        self.base = base_optimizer
-        self.step = tf.Variable(0, trainable=False, dtype=tf.int64)  # index into sigmas
-        self.sigmas = None
 
-    def reset(self, sigmas):
-        """Set noise schedule (list or tensor)."""
-        if sigmas is None:
-            self.sigmas = None  # Not using noise
+
+class AddWeightNoise(tf.keras.callbacks.Callback):
+    def __init__(self, sigma_schedule):
+        """
+        :param sigma_schedule: list or array of noise stddev values, one per epoch for this cycle.
+        """
+        super().__init__()
+        self.sigma_schedule = sigma_schedule
+        self._cur_epoch = 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._cur_epoch = epoch
+        sigma = self.sigma_schedule[epoch]
+        weights = self.model.get_weights()
+        noisy_weights = [
+            w + (np.random.normal(0, sigma, w.shape).astype(w.dtype) if w_ind < 2 else 0)
+            for w_ind, w in enumerate(weights)
+        ]
+        self.model.set_weights(noisy_weights)
+        print(f"Added noise σ={sigma:.4f} to weights at epoch {epoch}")
+        
+    def get_current_noise_sd(self):
+        if self.sigma_schedule is not None and self._cur_epoch < len(self.sigma_schedule):
+            return self.sigma_schedule[self._cur_epoch]
         else:
-            self.sigmas = tf.constant(sigmas, dtype=tf.float32)
-        self.step.assign(0)
-        logging.info("NoisyOptimizer reset with %d sigmas." % (0 if self.sigmas is None else len(self.sigmas)))
+            return 0.0
 
-    def update_learning_rate(self, learning_rate):
-        """Update the wrapped optimizer’s learning rate."""
-        self.base.learning_rate.assign(learning_rate)
-        logging.info("Updated learning rate to: %.6f", float(self.base.learning_rate.numpy()))
-
-    def apply_gradients(self, grads_and_vars, **kwargs):
-        # Determine noise std for this step
-        
-        sigma = 0.0
-
-        # Select current sigma safely
-        if self.sigmas is None:
-            sigma = tf.constant(0.0, dtype=tf.float32)
-        else:
-            step_index = tf.cast(self.step, tf.int32)
-            num_sigmas = tf.shape(self.sigmas)[0]
-            sigma = tf.cond(
-                step_index < num_sigmas,
-                lambda: self.sigmas[step_index],
-                lambda: tf.constant(0.0, dtype=tf.float32)
-            )
-        # sigma = self.sigmas[self.step] if self.sigmas is not None and self.step < len(self.sigmas) else 0.0
-
-        # Add Gaussian noise to gradients
-        
-        noisy = [(g + tf.random.normal(tf.shape(g), stddev=sigma) if g is not None else None, v)
-                 for g, v in grads_and_vars]
-        
-        self.step.assign_add(1)
-        self.iterations.assign_add(1)
-        return self.base.apply_gradients(noisy, **kwargs)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "base_optimizer": tf.keras.optimizers.serialize(self.base),
-            "sigmas": None if self.sigmas is None else self.sigmas.numpy().tolist(),
-        })
-        return config
 
 
 # ================================================================
@@ -93,9 +63,7 @@ class NoisyOptimizer(tf.keras.optimizers.Optimizer):
 
 class ResampleSequence(Sequence):
     def __init__(self, image_normalized, n_train, batch_size, weight_mask=None, shuffle=True, **kwargs):
-        """
-        
-        
+        """        
         :param image_normalized: HxWx3 numpy array with network input image normalized to [0,1] (or whatever network target range is)
         :param n_train: number of training samples to use (0 = all pixel xy positions, else sample this many random positions)
         :param batch_size: batch size for training, steps_per_epoch = ceil(n_train / batch_size)
@@ -170,7 +138,6 @@ class ResampleSequence(Sequence):
         if self._n_train == 0:
             # Use all pixels, just reshuffle order
             if self.shuffle:
-                logging.info("Shuffling training data for new epoch.")
                 order = np.random.permutation(len(self.input_xy_full_image))
             else:
                 order = np.arange(len(self.input_xy_full_image))
@@ -205,54 +172,10 @@ class ResampleSequence(Sequence):
             else:
                 self.sample_weight = None
             # Don't need to shuffle here since we're sampling randomly.
-            logging.info("Resampled %d random training points for new epoch.", self._n_train)
+            # logging.info("Resampled %d random training points for new epoch.", self._n_train)
 
     def on_epoch_end(self):
         self._resample()
-
-# # ================================================================
-# # 4️⃣ Dummy training data
-# # ================================================================
-# np.random.seed(42)
-# x_train = np.random.rand(1000, 10).astype(np.float32)
-# y_train = (np.sum(x_train, axis=1, keepdims=True) + np.random.randn(1000, 1) * 0.1).astype(np.float32)
-
-# # ================================================================
-# # 5️⃣ Build model and optimizer
-# # ================================================================
-# base_opt = tf.keras.optimizers.Adam(learning_rate=1e-3)
-# opt = NoisyOptimizer(base_opt)
-
-# model = tf.keras.Sequential([
-#     tf.keras.layers.Dense(32, activation='relu', input_shape=(10,)),
-#     tf.keras.layers.Dense(1)
-# ])
-# model.compile(optimizer=opt, loss='mse')
-
-# # ================================================================
-# # 6️⃣ Training setup
-# # ================================================================
-# epochs = 10
-# batch_size = 32
-# num_samples = x_train.shape[0]
-# steps_per_epoch = np.ceil(num_samples / batch_size)
-# total_steps = epochs * steps_per_epoch
-
-# sigmas = np.linspace(0.05, 0.0, total_steps)   # noise annealing
-# lrs = np.linspace(1e-3, 5e-4, epochs)     # learning rate schedule
-
-# train_seq = ResampleSequence(x_train, y_train, batch_size)
-# callbacks = [NoiseAnnealingCallback(sigmas, lrs)]
-
-# # ================================================================
-# # 7️⃣ Train
-# # ================================================================
-# history = model.fit(
-#     train_seq,
-#     epochs=epochs,
-#     callbacks=callbacks,
-#     verbose=1
-# )
 
 class NNetImage(object):
     """
@@ -349,9 +272,9 @@ class NNetImage(object):
         else:
                 
             network_weights = None
-            
+
         # Might have a different image now, finally set these:
-        self.n_input = n_train if n_train < 0 else image.shape[0] * image.shape[1]
+        self.n_input = n_train if n_train > 0  else image.shape[0] * image.shape[1]
         self.batch_size = batch_size
         self.minibatches_per_epoch = int(np.ceil(self.n_input / self.batch_size))
         self.image_size_wh = (self.image.shape[1], self.image.shape[0])  # (w,h)
@@ -361,7 +284,7 @@ class NNetImage(object):
         self._output = self.input_sampler.output_xy_full_image  
         self._sample_weights = self.input_sampler.sample_weights_full_image  # (report weighted loss too?)
         
-
+        self.anneal_noiser = None
 
 
         self._model = self._init_model()
@@ -370,19 +293,14 @@ class NNetImage(object):
             self._model.set_weights(network_weights)
         else:
             logging.info("Initialized new model.")
-            
-            
-            
-        base_optimizer = tf.keras.optimizers.Adadelta(
+         
+        self.optimizer = tf.keras.optimizers.Adadelta(
             learning_rate=1.0, use_ema=False, ema_momentum=0.99
         )
 
-        self._optimizer = NoisyOptimizer(base_optimizer, learning_rate_init=self._learning_rate)
+        self._model.compile(loss='mean_squared_error', optimizer=self.optimizer)
 
-        self._model.compile(loss='mean_squared_error', optimizer=self._optimizer)
-            
-            
-            
+
         # print("Initial learning rate:  %.7f" % self._learning_rate)
         # base_optimizer=tf.keras.optimizers.Adadelta(learning_rate=self._learning_rate, use_ema=False, ema_momentum=0.99)
         # optimizer = NoisyOptimizer(base_optimizer)
@@ -697,61 +615,59 @@ class NNetImage(object):
         logging.info("Current loss at cycle %i:  %.6f%s" % (self.cycle, loss, (" (weighted)" if weighted else "")))
         return loss
 
-    def train_more(self, epochs, learning_rate=None, noise_temps=None, verbose=True):
+    def train_more(self, epochs, learning_rate=None, noise_sigmas=None, verbose=True, loss_update_callback=None, param_update_callback=None):
         """
         Train for n more epochs (i.e. 1 more cycle).
 
         Learning rate is constant over the cycle.
         
-        Noise temps can be:
-          * Constant over the cycle, an [epochs]-element list for 
-          * Custom for each epoch: an [epochs]-element list of floats
-          * Custom for each minibatch: an [epochs x minibatches_per_epoch] 2D list / array of floats
-          * 0 or None for no noise
+        Noise sigmas can be:
+          * Constant over the cycle, (single float)
+          * Custom for each epoch (an [epochs]-element list of floats)
+          * No noise (None)
 
         :param epochs: number of epochs to train for
         :param learning_rate: if not None, update the learning rate to this value   
-        :param noise_temps: see above
+        :param noise_sigmas: see above
         :param verbose: if True, print progress bar during training
         
         """
         if learning_rate is not None:
             self._learning_rate = learning_rate
-            self._optimizer.update_learning_rate(self._learning_rate)
-            
+            self.optimizer.learning_rate.assign(self._learning_rate)
 
-        if noise_temps is not None:
+        if noise_sigmas is not None:
+
             # need to expand to single list, one per minibatch
-            if isinstance(noise_temps, (int, float)) and noise_temps >= 0:
-                noise_temps = float(noise_temps)
-                noise_temps = np.ones((epochs, self.minibatches_per_epoch), dtype=np.float32) * noise_temps
-            elif isinstance(noise_temps[0], (int, float)) and len(noise_temps) == epochs:
-                noise_temps = np.array(noise_temps, dtype=np.float32)
-                noise_temps = np.tile(noise_temps.reshape(-1, 1), (1, self.minibatches_per_epoch))
-            elif isinstance(noise_temps, (list, np.ndarray)) and len(noise_temps) == epochs and isinstance(noise_temps[0], (list, np.ndarray)) and \
-                    len(noise_temps[0]) == self.minibatches_per_epoch:
-                noise_temps = np.array(noise_temps, dtype=np.float32)
+            if noise_sigmas is None:
+                pass  # no noise
+            elif isinstance(noise_sigmas, (int, float)) and noise_sigmas >= 0:
+                noise_sigmas = np.ones(epochs, dtype=np.float32) * float(noise_sigmas)
+            elif len(noise_sigmas) == epochs:
+                noise_sigmas = np.array(noise_sigmas, dtype=np.float32)
             else:
-                raise ValueError("noise_temps must be a non-negative float, an [epochs]-element list, or an [epochs x minibatches_per_epoch] 2D list.")
-            # Set sigmas from temp using Langevin dynamics formula: sigma = sqrt(2 * learning_rate * temp)
-            noise_sigmas = np.sqrt(2.0 * self._learning_rate * noise_temps)
-            noise_sigmas = noise_sigmas.reshape(-1)  # flatten to 1D array for the optimizer
-            logging.info("Using noise sigmas with min %.6f, max %.6f, mean %.6f" % (np.min(noise_sigmas), np.max(noise_sigmas), np.mean(noise_sigmas)))
+                raise ValueError("noise_sigmas must be a single nonnegative float, None, or a list of length epochs (%d)" % (epochs,))
+            
+            logging.info("Using noise sigmas (%s) with min %.6f, max %.6f, mean %.6f" % (noise_sigmas.shape, np.min(noise_sigmas), np.max(noise_sigmas), np.mean(noise_sigmas)))
+            self.anneal_noiser = AddWeightNoise(noise_sigmas)
+            anneal_callbacks = [self.anneal_noiser]
         else:
-            noise_sigmas = None
-        self._optimizer.reset(noise_sigmas)
+            anneal_callbacks = []
+
         
-        batch_losses = BatchLossCallback(dry_run=self.dry_run,
+        batch_losses = BatchLossCallback(self,
+                                         dry_run=self.dry_run,
                                          n_epochs=epochs,
                                          noise_sds=noise_sigmas,
                                          n_train=self.input_sampler.get_n_train(),
                                          batch_size=self.batch_size, 
-                                         anneal_temps=noise_temps)
+                                         begin_callback=param_update_callback,
+                                         end_callback=loss_update_callback)
         
 
         if not self.dry_run:
             # train_seq = ResampleSequence(x_train, y_train, batch_size)  now self.input_sampler
-            callbacks = [batch_losses]
+            callbacks = [batch_losses] + anneal_callbacks
 
             hist =  self._model.fit(self.input_sampler,
                                     epochs=epochs,
@@ -768,7 +684,7 @@ class NNetImage(object):
 
         logging.info("Batch losses for cycle %i has %i epochs, each with %i minibatches" % (self.cycle, len(loss_history), len(loss_history[0])))
         self.cycle += 1
-        
+        self.anneal_noiser = None
         return loss_history
     
     
@@ -915,19 +831,21 @@ class BatchLossCallback(Callback):
     Get loss vector (for all minibatches in an epoch) for every epoch
     """
 
-    def __init__(self, dry_run, n_epochs, n_train, batch_size, noise_sds=None, anneal_temps=None):
+    def __init__(self, nnet_img, dry_run, n_epochs, n_train, batch_size, noise_sds=None,begin_callback=None,end_callback=None):
         """
         Record the losses from each minibatch & epoch for this cycle. (list of lists)
         
         If dry run, make up fake data, appropriate for the number of minibatches/epoch, and number of epochs
         """
         super().__init__()
+        self.nnet_img = nnet_img
         self.dry_run = dry_run
         self.n_epochs = n_epochs
         self.noise_sds = noise_sds
         self.n_train = n_train
         self.batch_size = batch_size
-        self.anneal_temps = anneal_temps
+        self._begin_callback = begin_callback
+        self._end_callback = end_callback
         
         self.losses = []  # list for each epoch of all minibatch losses
         if dry_run:
@@ -948,10 +866,21 @@ class BatchLossCallback(Callback):
 
     def on_epoch_begin(self, epoch, logs=None):
         self.losses.append([])  # new epoch    
+        if self._begin_callback is not None:
+            noise_sd = self.nnet_img.anneal_noiser.get_current_noise_sd() if self.nnet_img.anneal_noiser is not None else 0.0
+            
+            info = {'epoch': epoch,
+                    'learning_rate': self.nnet_img.optimizer.learning_rate.numpy(),
+                    'noise_sd': noise_sd,
+                    'noise_temp': noise_sd  # Same, no longer using gradient noise (TODO: factor one out)
+                    }
+            self._begin_callback(info)
 
     def on_train_batch_end(self, batch, logs=None):
         self.losses[-1].append(logs['loss'])
-        
+        if self._end_callback is not None:
+            info = {'epoch_loss': np.mean(logs['loss']),}
+            self._end_callback(info)
 
 
 def test_vertical():
@@ -972,10 +901,8 @@ def test_vertical():
                          'offsets_xy_rel': (.678, .412)}
 
     
-    anneal_args = [10.0, 0.001, 1000]
-
     # The rest of the training parameters:
-    kwargs = {'image': cv2.imread(r'input/barn_small.png'),  
+    kwargs = {'image': cv2.imread(r'input/barn_small.png')[:,:,::-1],  
             'n_div': {'linear': 32, 'circular': 0, 'sigmoid': 0}, 
               'n_hidden': 64, 'n_structure': 255,
               'display_multiplier': 6,
@@ -983,12 +910,14 @@ def test_vertical():
               'center_weight_params': None,  # barn_weights,
               'learning_rate': 1.0, 
               #'learning_rate_final': 0.0001,  # run_cycles must be > 0 for this to be used
-              #'anneal_args': anneal_args, 
               'nogui': True,
               'batch_size': 32,
               'run_cycles': 5, 'epochs_per_cycle': 10}
     
     s = NNetImage(**kwargs)
+    
+    def _param_update_callback(info):
+        print("  Epoch %i:  lr %.6f,  noise_sd %.6f,  noise_temp %.6f" % (info['epoch']+1, info['learning_rate'], info['noise_sd'], info['noise_temp']))
     
     # DO cycles manually here:
     for cycle_ind in range(kwargs['run_cycles']):
@@ -999,7 +928,7 @@ def test_vertical():
         # TODO: implement learning rate decay with learning_rate_final argument
         learning_rate = kwargs['learning_rate']
         loss = s.train_more(epochs=kwargs['epochs_per_cycle'], learning_rate=learning_rate, 
-                            noise_temps=noise_temps, verbose=True)
+                            noise_temps=noise_temps, verbose=True, param_update_callback=_param_update_callback)
         epoch_means = [np.mean(epoch)for epoch in loss]
         print("Last cycle mean loss:  %.6f,  Last epoch mean loss:  %.6f,  Last minibatch loss:" % (
             np.mean(epoch_means), epoch_means[-1]), loss[-1][-1])

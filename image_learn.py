@@ -54,13 +54,18 @@ class UIDisplay(object):
         self.n_structure = n_structure
         self._center_weight_params = center_weight_params
         self._update_plots = False
-        self._run_cycles = run_cycles
+        self._max_run_cycles = run_cycles
+        self._run_cycle = 0   # run to max_run_cycles then quit
+        self._cycle = 0  # Inherited from previous runs if resuming, else = run_cycle
+
         self._shutdown = False
         self._line_params = line_params
         self._frame_dir = frame_dir
-        self._cycle = 0  # epochs_per_cycle epochs of training and an output update increments this
         self._annotate = False
         self._learn_rate = learning_rate  # updates as we anneal
+        
+        self.noise_sd = 0.0
+        self.noise_temp = 0.0
         self._n_train = n_train  # 0 means use all pixel positions (no noise), else sample this many random xy positions
         self._learning_rate_init = learning_rate
         self._learning_rate_final = learning_rate_final
@@ -78,7 +83,7 @@ class UIDisplay(object):
         self.div_render_params = div_render_params if div_render_params is not None else {}
         self._anneal = anneal_args
         self._show_all_history = True
-        self.curr_loss_unweighted = -1
+        self.curr_loss = -1
         self.last_epoch_mean_loss = -1
         self._kwargs = kwargs  # save for later if needed
         self._dry_run = dry_run
@@ -87,12 +92,12 @@ class UIDisplay(object):
         if learning_rate_final is not None:
             if learning_rate_final < 0:
                 raise Exception("Final learning rate must be non-negative for annealing.")
-            if self._run_cycles <= 0:
+            if self._max_run_cycles <= 0:
                 raise Exception("Must specify run_cycles > 0 if annealing with learning_rate_final.")
             if learning_rate >0:
-                self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / (self._run_cycles-1)) if self._run_cycles > 1 else 1.0
-                logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles (Decay constant: %.6f)." %
-                            (learning_rate, learning_rate_final, self._learning_rate_decay, self._run_cycles, self._learning_rate_decay))
+                self._learning_rate_decay = (learning_rate_final / learning_rate) ** (1.0 / (self._max_run_cycles-1)) if self._max_run_cycles > 1 else 1.0
+                logging.info("Using learning rate annealing:  initial: %.6f, final: %.6f, decay: %.6f per cycle over %i cycles (Decay constant: %.8f)." %
+                            (learning_rate, learning_rate_final, self._learning_rate_decay, self._max_run_cycles, self._learning_rate_decay))
             else:
                 self._learning_rate_decay = 0.0
         else:
@@ -125,6 +130,7 @@ class UIDisplay(object):
                 if 'loss_history' in metadata:
                     self._loss_history = metadata['loss_history'] 
                     logging.info("Loaded loss history with %i entries." % (len(self._loss_history),))
+                    self.curr_loss = np.mean([np.mean(epoch_loss) for epoch_loss in self._loss_history[-1]['epochs']]) if len(self._loss_history)>0 else -1
                 else:
                     logging.warning("Metadata found but contains no loss history")
                     self._loss_history = []
@@ -230,11 +236,11 @@ class UIDisplay(object):
         logging.info("\tGradient sharpness: %f" % (self._sim.grad_sharpness,))
 
         self._cycle = self._sim.cycle  # in case resuming from a saved statese\\
-        run_cycle = 0  # number of cycles since starting this run (not counting previous runs if resuming from a saved state)
+        self._run_cycle = 0  # number of cycles since starting this run (not counting previous runs if resuming from a saved state)
 
-        if self._run_cycles > 0:
+        if self._max_run_cycles > 0:
             logging.info("Will run for %i cycles of %i epochs each (total %i epochs), starting from cycle %i." %
-                         (self._run_cycles, self._epochs_per_cycle, self._run_cycles * self._epochs_per_cycle, self._cycle))
+                         (self._max_run_cycles, self._epochs_per_cycle, self._max_run_cycles * self._epochs_per_cycle, self._cycle))
 
         # write frame before any training (may overwrite last frame if continuing a run).
         self._output_image = self._gen_image()
@@ -244,63 +250,91 @@ class UIDisplay(object):
         
         if self._cycle == 0:
             # Initial image, random weights, no training.  (Remove?)
-            cur_loss_uw = self._sim.get_loss(weighted=False)
+            cur_loss_w = self._sim.get_loss(weighted=True if self._center_weight_params is not None else False)
             frame_name = self._write_frame(self._output_image)  # Create & save image
             init_meta = {'cycle': self._sim.cycle,
-                         'learning_rate': self._learn_rate,
-                         'current_loss': cur_loss_uw,
+                         'learning_rate': float(self._learn_rate),
+                         'current_loss': cur_loss_w,
                          'filename': frame_name}
+            
             self._metadata.append(init_meta)
             self._write_metadata()
 
         anneal_temp, anneal_decay = 0, 0
         if self._anneal is not None:
             anneal_temp = self._anneal[0]
-            if self._run_cycles == 0:
+            decay_cycles = self._anneal[2]
+            if decay_cycles == 0:
                 anneal_decay = self._anneal[1]  # if running forever, just use the decay constant
             else:
-                n_epochs = self._epochs_per_cycle * (self._run_cycles if self._run_cycles > 0 else 1)
-                anneal_decay = (self._anneal[1]/self._anneal[0]) ** (1.0 / n_epochs)  # decay per epoch
-                logging.info("Using Langevin dynamics with initial temp %.6f, decay %.6f per epoch over %i epochs." %
-                            (anneal_temp, anneal_decay, n_epochs))
-
-        self.curr_loss_unweighted = -1.0
-        while (max_iter==-1 or run_cycle < max_iter) and not self._shutdown and (run_cycle < self._run_cycles or self._run_cycles == 0):
+                n_epochs = self._epochs_per_cycle * decay_cycles
+                anneal_decay = (self._anneal[1] / self._anneal[0]) ** (1.0 / float(n_epochs-1))
+                
+        t0 = time.perf_counter()
+        cycle_times = []
+        n_max_c_times = 5
+        while (max_iter==-1 or self._run_cycle < max_iter) and not self._shutdown and (self._run_cycle < self._max_run_cycles or self._max_run_cycles == 0):
             if self._shutdown:
                 break
-            logging.info("Training batch_size: %i, cycle: %i of %i, learning_rate: %.6f" %
-                         (self._sim.batch_size, self._sim.cycle, self._run_cycles, self._learn_rate))
-            
+            logging.info("Training batch_size: %i, cycle: %i (%i of %i this run), learning_rate: %.6f" %
+                         (self._sim.batch_size, self._sim.cycle, self._run_cycle+1, self._max_run_cycles, self._learn_rate))
+
             if self._anneal is not None:
+                # if we should stop annealing, just set anneal_decay to 0.0
+
                 anneal_temps = anneal_temp * (anneal_decay ** np.arange(self._epochs_per_cycle))
-                logging.info("Using Langevin dynamics with noise temps:  %.6f, ..., %.6f" % (anneal_temps[0], anneal_temps[-1]))
+                logging.info("Adding weight with noise SDs:  %.6f, ..., %.6f" % (anneal_temps[0], anneal_temps[-1]))
                 anneal_temp = anneal_temps[-1]  * anneal_decay  # update for next cycle
+                
+                if self._run_cycle >= self._anneal[2] and self._anneal[2] > 0:
+                    anneal_decay = 0.0  
+                    anneal_temps *= 0.0
+
+                
             else:
                 anneal_temps = np.zeros(self._epochs_per_cycle)
             
             new_losses = self._sim.train_more(self._epochs_per_cycle, 
                                               learning_rate=self._learn_rate,
                                               verbose=self._verbose, 
-                                              noise_temps=anneal_temps)
-            cur_loss_uw = self._sim.get_loss(weighted=False)
+                                              noise_sigmas=anneal_temps,
+                                              loss_update_callback=self._epoch_update,
+                                              param_update_callback=self._param_update)
+            
+            cur_loss_w = self._sim.get_loss(weighted=True if self._center_weight_params is not None else False)
             last_epoch_mean_loss = np.mean(new_losses[-1]) if len(new_losses) > 0 else -1
             output_image = self._gen_image()
             
+            now = time.perf_counter()
+            cycle_time = now - t0
+            cycle_times.append(cycle_time)  
+            if len(cycle_times) > n_max_c_times:
+                cycle_times = cycle_times[-n_max_c_times:]
+            t0 = now
+            if self._max_run_cycles > 0:
+                n_cycles_left = self._max_run_cycles - self._run_cycle - 1 
+                eta = n_cycles_left * np.mean(cycle_times)
+                eta_hr = int(eta // 3600)
+                eta_min = int((eta % 3600) // 60)
+                eta_sec = eta % 60
+                logging.info("Cycle time: %.1f sec, estimated time remaining for %i cycles: %02i:%02i:%05.2f (hr:min:sec)" % (cycle_time, n_cycles_left, eta_hr, eta_min, eta_sec))
+            
+            
+            
+            
             
             with self._hist_lock:
-                
-                
-                self.curr_loss_unweighted = cur_loss_uw
-                self.last_epoch_mean_loss = last_epoch_mean_loss    
+                self.curr_loss = cur_loss_w
+                self.last_epoch_mean_loss = last_epoch_mean_loss
                 self._output_image = output_image
-                self._l_rate_history.append(self._learn_rate)
+                self._l_rate_history.append(float(self._learn_rate))
                 self._anneal_history.append(anneal_temps.tolist())
-                self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss_uw})
-                
+                self._loss_history.append({'cycle': self._cycle, 'epochs': new_losses,'final_loss': cur_loss_w})
+
             self._cycle = self._sim.cycle  # update AFTER saving data, since train_more increments it at the end
 
             frame_name = self._write_frame(self._output_image)  # Create & save image
-            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': self._learn_rate, 'current_loss': cur_loss_uw, 'filename': frame_name})
+            self._metadata.append({'cycle': self._sim.cycle, 'learning_rate': float(self._learn_rate), 'current_loss': cur_loss_w, 'filename': frame_name})
             self._write_metadata()
             filename = self.get_filename('model')
             out_path = filename if self._frame_dir is None else os.path.join(self._frame_dir, filename)
@@ -315,9 +349,9 @@ class UIDisplay(object):
             if self._shutdown:
                 break
             
-            run_cycle += 1
-            if run_cycle >= self._run_cycles and self._run_cycles > 0:
-                logging.info("Reached max cycles (%i), stopping." % (self._run_cycles,))
+            self._run_cycle += 1
+            if self._run_cycle >= self._max_run_cycles and self._max_run_cycles > 0:
+                logging.info("Reached max cycles (%i), stopping." % (self._max_run_cycles,))
                 self._shutdown = True
                 break
 
@@ -330,9 +364,9 @@ class UIDisplay(object):
             logging.info("To make a movie from the images, try:")
             logging.info("  ffmpeg -y -framerate 10 -i %s_output_%s_cycle-%%08d.png -c:v libx264 -pix_fmt yuv420p output_movie.mp4" %
                          (os.path.join(self._frame_dir, self._file_prefix), self._get_arch_str()))
-        self.final_loss = cur_loss_uw
-        logging.info("Final loss after %i cycles:  %.6f" % (run_cycle, cur_loss_uw))
-        return cur_loss_uw
+        self.final_loss = cur_loss_w
+        logging.info("Final loss after %i cycles:  %.6f" % (self._run_cycle, cur_loss_w))
+        return cur_loss_w
 
     def _gen_image(self, shape=None):
         
@@ -391,7 +425,6 @@ class UIDisplay(object):
         metadata = {'frames': deepcopy(self._metadata),
                     'model_file': self.get_filename('model'),
                     'train_image_file': self._train_img_filename,
-                    'n_train': self._n_train,
                     'loss_history': self._loss_history,
                     'learning_rate_history': self._l_rate_history,
                     'anneal_history': self._anneal_history}
@@ -434,6 +467,15 @@ class UIDisplay(object):
         
     def get_train_image(self):
         return self._sim.image
+    
+    def _epoch_update(self, update_info):
+        # Update axis label w/last epoch loss:
+        self.last_epoch_mean_loss = update_info['epoch_loss']
+        
+    def _param_update(self, update_info):
+        self.noise_sd = update_info['noise_sd']
+        self.noise_temp = update_info['noise_temp']
+        self._learn_rate = update_info['learning_rate']
 
     def run(self, debug_epochs_nothread=-1):  # set -1 for regular operation
         """
@@ -537,12 +579,11 @@ class UIDisplay(object):
         if anneal_ax is not None:
             anneal_ax.grid(which='major', axis='both')
             anneal_ax.set_ylabel("Temp", fontsize=8)
-            anneal_ax.set_title("Annealing Temp:  %.6f" % (0,), fontsize=10)
+            anneal_ax.set_title("Annealing Temp:  %.6f (sd=%.6f)" % (self.noise_temp, self.noise_sd), fontsize=10)
 
         lrate_ax.set_ylabel("")  # Learning Rate")
-        lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
-        lrate_title += "\nCurrent Annealing Temp:  %.6f" % (0,)
-        lrate_ax.set_title(lrate_title, fontsize=12)
+        lrate_title = "Learning Rate (current %.6f)" % (self._learn_rate,)
+        lrate_ax.set_title(lrate_title, fontsize=11)
         lrate_ax.set_yscale('log')
         
         # Architecture string, for titles
@@ -597,26 +638,27 @@ class UIDisplay(object):
             # Update titles w/dynamic info every loop 
             cmd =( "\n('w' to hide weight contours)" if self._show_weight_contours else "\n('w' to show weight contours)")\
                 if self._center_weight_params is not None else ""
-            train_ax.set_title("Training cycle %i/%s, target image %i x %i%s" %
-                (self._cycle+1, self._run_cycles if self._run_cycles > 0 else '--',
+            train_ax.set_title("Training cycle %i (%s/%s), target image %i x %i%s" %
+                (self._cycle+1, self._run_cycle+1, self._max_run_cycles if self._max_run_cycles > 0 else '--',
                     self._sim.image.shape[1], self._sim.image.shape[0], cmd))
             
-            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)" % (  self._batch_size), fontsize=12)
+            loss_ax.set_title("Training Loss History\n1 dot = 1 minibatch (%i samples)" % (  self._batch_size), fontsize=11)
             if anneal_ax is not None:
-                anneal_ax.set_title("Annealing Temp:  %.6f" % (0,), fontsize=12)
+                anneal_ax.set_title("Annealing Temp (SD):  %.6f (%.6f)" % (self.noise_temp, self.noise_sd), fontsize=11)
+            cmd = "(Hit 'd' to hide division units.)" if self._show_dividers else "(Hit 'd' to plot division units.)"
+            out_unit_ax.set_title("Output image %s" % (cmd,), fontsize=11)
+
             lrate_title = "Learning Rate, current %.6f" % (self._learn_rate,)
-            lrate_ax.set_title(lrate_title, fontsize=12)
+            lrate_ax.set_title(lrate_title, fontsize=11)
             cmd = "hit 'a' to show last 5 cycles only." if self._show_all_history else "Hit 'a' to show all cycles."
             loss_ax.set_xlabel("Cycle (%i epochs) - %s" % (self._epochs_per_cycle, cmd))
 
-            cmd = "(Hit 'd' to hide division units.)" if self._show_dividers else "(Hit 'd' to plot division units.)"
-            out_unit_ax.set_title("Output image %s" % (cmd,), fontsize=12)
             last_epoch_loss =  self.last_epoch_mean_loss
-            cur_loss = self.curr_loss_unweighted
+            cur_loss = self.curr_loss
             wt = " (weighted)" if self._center_weight_params is not None else ""
-            loss_str = "   Last cycle mean loss:  %.6f\nLast training epoch loss%s: %.6f" % (cur_loss, wt,last_epoch_loss)
+            loss_str = "   Last cycle mean loss%s:  %.6f\nLast training epoch loss%s: %.6f" % (wt, cur_loss, wt, last_epoch_loss)
             
-            out_unit_ax.set_xlabel(loss_str, fontsize=12)
+            out_unit_ax.set_xlabel(loss_str, fontsize=11)
             
 
 
@@ -742,7 +784,7 @@ class UIDisplay(object):
                 if anneal_ax is not None:
                     anneal_temp_x, anneal_temp_y = np.array(anneal_temp_x), np.array(anneal_temp_y)
                     if artists.get('anneal') is None and anneal_history is not None:
-                        artists['anneal'] = anneal_ax.plot(anneal_temp_x, anneal_temp_y,'o',markersize=7, label='Anneal Temp')[0]
+                        artists['anneal'] = anneal_ax.plot(anneal_temp_x, anneal_temp_y,'b.',markersize=7, label='Anneal Temp')[0]
                     elif artists.get('anneal') is not None and anneal_history is not None:
                         artists['anneal'].set_data(anneal_temp_x, anneal_temp_y)
                     anneal_range = np.max(anneal_temp_y) - np.min(anneal_temp_y)
@@ -837,7 +879,8 @@ def get_args():
                     help="Generate output images with division units rendered as lines, params are THICKNESS RED GREEN BLUE (ints)")
     
     parser.add_argument('--anneal', type=float, nargs=3, default=None, help="Annealing parameters: [T_init] [T_final/decay] [n_cycles]: "+
-                        "where the temperature is exponentially decayed from T_init to T_final over n_cycles (if training for longer, T=0 after n_cycles)." )
+                        "where the temperature is exponentially decayed from T_init to T_final over n_cycles (if training for longer, T=0 after n_cycles)."+
+                        "  If n_cycles=0, use the second parameter as the decay factor per epoch (not cycle).  (Noise SD = N(0, T) added to divider unit parameters each step.)")
     parser.add_argument('--dry_run', action='store_true', help="Run all minibatches/epochs/cycles, but don't do training, just report fake results")
     parsed = parser.parse_args()
     
@@ -847,10 +890,10 @@ def get_args():
     if parsed.anneal is not None:
         if len(parsed.anneal) != 3:
             raise Exception("If using --anneal, must provide 3 values:  T_init, T_final, n_cycles")
-        if parsed.anneal[0] <= parsed.anneal[1]:
+        if parsed.anneal[0] < parsed.anneal[1] and parsed.anneal[2] !=0:
             raise Exception("If using --anneal, T_init must be > T_final")
-        if parsed.anneal[2] <= 0:
-            raise Exception("If using --anneal, n_cycles must be > 0")  
+        if parsed.anneal[2] < 0:
+            raise Exception("If using --anneal, n_cycles must be >= 0")  
         if parsed.anneal[1] <= 0.0:
             raise Exception("If using --anneal, T_final must be > 0.0 for the multiplicative decay to work.")
     
@@ -912,12 +955,12 @@ if __name__ == "__main__":
 
     if parsed.input_image is None and parsed.model_file is None and parsed.test_image is None:
         raise Exception("Need input image (-i) to start training, or model file (-m) to continue.")
-    import pprint
-    print_args = kwargs.copy()
-    print_args['_image_file'] = parsed.input_image
-    print_args['_model_file'] = parsed.model_file
-    print_args['_test_image'] = parsed.test_image
-    pprint.pprint(print_args)
+    # import pprint
+    # print_args = kwargs.copy()
+    # print_args['_image_file'] = parsed.input_image
+    # print_args['_model_file'] = parsed.model_file
+    # print_args['_test_image'] = parsed.test_image
+    # pprint.pprint(print_args)
     
     s = UIDisplay(image_file=parsed.input_image,synth_image_name = parsed.test_image, state_file=parsed.model_file, **kwargs)
     s.run()

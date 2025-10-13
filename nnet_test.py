@@ -191,7 +191,7 @@ class ScaleFreeImage(object):
             x = Dense(n, activation=activation, use_bias=(n>0))(x)  # Input bias included in polynomial expansion
         outputs = Dense(n_output, activation='sigmoid')(x)
         self._model = Model(inputs=inputs, outputs=outputs)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, use_ema=False, ema_momentum=0.9)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate, use_ema=False, ema_momentum=0.95)
         
         if not self._clobber:
             if weights_file is not None:
@@ -215,11 +215,11 @@ class ScaleFreeImage(object):
         
         logging.info("Saving model weights and metadata...")
         
-        if self._save_thread is not None and self._save_thread.is_alive():
-            logging.info("Previous save thread still running, waiting...")
-            self._save_thread.join()
-            logging.info("Previous save thread finished.")
-            self._save_thread = None
+        # if self._save_thread is not None and self._save_thread.is_alive():
+        #     logging.info("Previous save thread still running, waiting...")
+        #     self._save_thread.join()
+        #     logging.info("Previous save thread finished.")
+        #     self._save_thread = None
         
         def save_proc():
             logging.info("Saving thread begining...")
@@ -230,9 +230,10 @@ class ScaleFreeImage(object):
             self._write_metadata()
             logging.info("Saving thread exiting.")
         
-        self._save_thread = Thread(target=save_proc)
-        self._save_thread.start()
-        logging.info("Started metadata save thread.")
+        # self._save_thread = Thread(target=save_proc)
+        # self._save_thread.start()
+        # logging.info("Started metadata save thread.")
+        save_proc()
 
         
         

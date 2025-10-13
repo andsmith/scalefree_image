@@ -20,6 +20,51 @@ def fade(image, alpha):
     """
     faded = (image.astype(np.float32) * alpha + 255 * (1 - alpha)).astype(np.uint8)
     return faded
+
+
+
+def poly_expand_features(xy, order):
+    """
+    Given an Nx2 array of x,y positions, return an NxM array of polynomial features up to self.order
+    where M = (n+1)(n+2)/2 is the number of terms in a 2D polynomial of order n.
+    :param xy: Nx2 array of x,y positions
+    :param order: maximum polynomial order
+    :return: NxM array of polynomial features
+    """
+    n = order
+    N = xy.shape[0]
+    features = [np.ones((N,1), dtype=xy.dtype)]  # bias term
+    for i in range(1, n+1):
+        for j in range(i+1):
+            x_term = xy[:,0]**(i-j)
+            y_term = xy[:,1]**j
+            features.append((x_term * y_term).reshape(N,1))
+    return np.hstack(features)
+
+
+def test_poly_expand_features():
+    # Test the poly_expand_features function
+    xy = np.random.rand(100,2).astype(np.float32)*2.0 - 1.0
+    x, y = xy[:,0].reshape(-1, 1), xy[:,1].reshape(-1, 1)
+    ones = np.ones((xy.shape[0], 1), dtype=np.float32)
+    xy_poly1 = np.concatenate([ones, x, y], axis=1)
+    xy_poly2 = np.concatenate([xy_poly1, x**2, x*y, y**2], axis=1)
+    xy_poly3 = np.concatenate([xy_poly2, x**3, x**2*y, x*y**2, y**3], axis=1)
+    xy_poly4 = np.concatenate([xy_poly3, x**4, x**3*y, x**2*y**2, x*y**3, y**4], axis=1)
+
+    def _test_order(order, expected):
+        result = poly_expand_features(xy, order)
+        assert result.shape == expected.shape, f"Shape mismatch for order {order}: got {result.shape}, expected {expected.shape}"
+        assert np.allclose(result, expected), f"Value mismatch for order {order}"
+    
+    _test_order(1, xy_poly1)    
+    _test_order(2, xy_poly2)
+    _test_order(3, xy_poly3)
+    _test_order(4, xy_poly4)
+    
+    
+    print("All tests passed for poly_expand_features.")
+
 def make_input_grid(img_shape=None, resolution=1.0, border=0.0, keep_aspect=True):
     """ Make a grid of input coordinates in [-1,1]x[-1,1]
     img_shape: (height, width, channels)
@@ -146,7 +191,7 @@ def draw_bbox(image, bbox, color=(0, 255, 0), thickness=1):
     cv2.rectangle(image, (x0, y0), (x1, y1), color, thickness)
         
 
-def captioned_frame(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0),
+def captioned_image(img, caption, caption_height_px=30, caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(0,0,0),
                     justify='center', line_spacing=1.5, font_face=cv2.FONT_HERSHEY_SIMPLEX, **kwargs):
 
     caption_h = caption_height_px
@@ -238,11 +283,11 @@ def test_make_central_weights():
     plt.tight_layout()
     plt.show()
 
-def test_captioned_frame():
+def test_captioned_image():
     
     test_frame = cv2.imread('movies\\washington_linear_8d_10h_cycle-00000010.png')
     caption = ['This is a test caption', 'Second line of caption']
-    frame = captioned_frame(test_frame, caption, caption_height_px=50, line_spacing=2.0,caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(50,50,50))
+    frame = captioned_image(test_frame, caption, caption_height_px=50, line_spacing=2.0,caption_pad_xy=(10, 5), txt_color=(255,255,255), bkg_color=(50,50,50))
 
     cv2.imshow("Test Captioned Frame", frame)
     cv2.waitKey(0)
@@ -396,10 +441,11 @@ def test_find_boundary_pixels():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    #test_captioned_frame()
+    #test_captioned_image()
     # test_add_text()
     # test_make_input_grid()
-    #test_make_central_weights()
+    # #test_make_central_weights()
+    test_poly_expand_features()
     # test_pairwise_hamming()
     # test_find_boundary_pixels()
     test_pixels_in_bbox()

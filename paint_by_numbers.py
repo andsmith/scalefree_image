@@ -20,7 +20,7 @@ import logging
 import cv2
 import numpy as np
 from synth_image import TestImageMaker
-
+import pickle
 import matplotlib.pyplot as plt
 from util import make_input_grid, pairwise_hamming,find_boundary_pixels,pixels_in_bbox
 
@@ -57,9 +57,14 @@ class Divider(ABC):
         """
         x, y = make_input_grid(shape, resolution=1.0, keep_aspect=True)
         return self.eval(x, y)
+    
+    @abstractmethod
+    def plot(self, ax, xlim, ylim):
+        pass
 
 class LineDivider(Divider):
     def eval(self, x, y):
+        #x,y = y, x
         angle = self.params[2]
         center = self.params[:2]
         vec = np.stack([x,y], axis=-1) - center
@@ -74,6 +79,20 @@ class LineDivider(Divider):
         angle = np.random.uniform(0, 2.0 * np.pi)
         return LineDivider(np.array([x, y, angle], dtype=np.float32))
     
+    def plot(self, ax, xlim, ylim): 
+
+        angle = np.pi/2.0 - self.params[2] 
+        center = self.params[:2]
+        
+        unit = np.array([np.cos(angle), np.sin(angle)])
+        center[1] = -center[1]
+        t = [-10.0, 10.0]
+        line_pts = np.array([center + unit * ti for ti in t])
+        
+        
+        ax.plot(line_pts[:,0], line_pts[:,1], 'r-')
+        ax.plot(center[0], center[1], 'ro')
+    
 class CircleDivider(Divider):
     def eval(self, x, y):
         center = self.params[:2]
@@ -87,6 +106,56 @@ class CircleDivider(Divider):
         y = np.random.uniform(-1.0, 1.0)
         log_radius = np.random.uniform(np.log(0.05), np.log(0.5))
         return CircleDivider(np.array([x, y, log_radius], dtype=np.float32))
+    
+    def plot(self, ax, xlim, ylim): 
+        center = self.params[:2]
+        center[1] = -center[1] #+ res[1]/2.0  
+
+        radius = np.exp(self.params[2])
+        circle = plt.Circle((center[0], center[1]), radius, color='b', fill=False)
+        ax.add_artist(circle)
+        ax.plot(center[0], center[1], 'bo')
+    
+    
+    
+def dividers_from_model(filename):
+    """
+    NNetImage model state files have a top-level dict with keys:
+        - 'weights', a list of numpy arrays.
+        - 'n_div', a dict with {'linear': int, 'circular': int, 'normal': int} 
+        
+    Divider weights are in groups of 3 arrays (Center, Angle/radius, sharpness).
+    Divider weights are first in the 'weights' list.  
+    If both circular and linear dividers are used, circular dividers come first.
+    Normal (sigmoid) dividers are unimplemented in this module.
+    """
+    with open(filename, 'rb') as f:
+        state = pickle.load(f)  
+    n_div = state['n_div']
+    weights = state['weights']
+    dividers = []
+    w_i = 0
+    print("Loaded weights:", [w.shape for w in weights])
+    # import ipdb; ipdb.set_trace()
+    if n_div['circular']>0:
+        centers = weights[w_i]
+        log_radii = weights[w_i+1].reshape(-1,1)
+        param_arr = np.concatenate([centers, log_radii], axis=1)
+        dividers.extend([CircleDivider(param_arr[i]) for i in range(n_div['circular'])])
+        w_i += 3 
+    if n_div['linear']>0:
+        centers = weights[w_i]
+        angles = weights[w_i+1].reshape(-1,1)
+        print(centers.shape,angles.shape)
+        param_arr = np.concatenate([centers, angles], axis=1)
+        
+        dividers.extend([LineDivider(param_arr[i]) for i in range(n_div['linear'])])
+        w_i += 3 
+    logging.info(f"Loaded {len(dividers)} dividers from model {filename}: {n_div}")
+    return dividers
+        
+        
+        
 
 
 class ColorEncoding(object):
@@ -150,10 +219,42 @@ class ColorEncoding(object):
         colors = colors_flat.reshape(data_shape + (3,))
         return colors
     
+    
+    def render_regions(self, regions, size_wh, ax=None):
+        """
+        Create a full size array, add each reagion mask to it with a different index.
+        """
+        w, h = size_wh
+        region_img = np.zeros((h, w), dtype=np.int32) - 1
+        for i, region in enumerate(regions):
+            x_min, y_min, x_max, y_max = region['bbox']['x'][0], region['bbox']['y'][0], region['bbox']['x'][1], region['bbox']['y'][1]
+            region_img[y_min:y_max, x_min:x_max][region['mask']] = i
+            
+            
+        aspect, xlim, ylim = get_aspect_and_lims(region_img.shape)
+        if ax is None:
+            _, ax = plt.subplots(1, 1, figsize=(6,6))
+        
+        ax.imshow(region_img, cmap='tab20', extent = (xlim[0], xlim[1], ylim[0], ylim[1]))
+
+        for divider in self.dividers:
+            divider.plot(ax, xlim, ylim)
+                
+        # add colorbar
+        cbar = plt.colorbar(mappable=plt.cm.ScalarMappable(cmap='tab20'), ax=ax, fraction=0.046, pad=0.04, ticks=np.arange(-0.5, len(regions), 1))
+        ax.set_title(f"Regions: {len(regions)}")
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        ax.set_aspect('equal')
+    
         
     def train_image(self, target_image):
         h, w = target_image.shape[0], target_image.shape[1]
         regions = self._find_regions(h, w)
+        self.render_regions(regions, (w,h))
+        plt.show()
+
+        import ipdb; ipdb.set_trace()
         self._codes, self._colors = self._optimize_colors(target_image, regions)
         self._LUT = {tuple(self._codes[i]): self._colors[i] for i in range(self._codes.shape[0])}
 
@@ -376,7 +477,7 @@ def prune_mask(mask, old_bbox=None):
         return np.zeros((0,0), dtype=bool)
     y0, y1 = np.min(ys), np.max(ys) + 1
     x0, x1 = np.min(xs), np.max(xs) + 1
-    pruned = mask[y0:y1, x0:x1]
+    pruned = mask[y0:y1, x0:x1].reshape((y1 - y0, x1 - x0))
     if old_bbox is not None:
         y0 += old_bbox['y'][0]
         x0 += old_bbox['x'][0]
@@ -397,19 +498,33 @@ def get_aspect_and_lims(shape):
         
     return aspect, xlim, ylim
 
-def test_make_LUT(image_size=(32, 24), n_circles=50, n_lines=50):
-    dividers = [LineDivider.make_rand() for _ in range(n_lines)] + \
-               [CircleDivider.make_rand() for _ in range(n_circles)]
+def test_make_LUT(image_size=(100,100), n_circles=0, n_lines=2):
+    # dividers = [LineDivider.make_rand() for _ in range(n_lines)] + \
+    #            [CircleDivider.make_rand() for _ in range(n_circles)]
                
-    # dividers = [LineDivider((0.0, 0.0, np.pi/2)),
-    #             LineDivider((0.0, 0.0, 0)),]
+    dividers = [LineDivider([0.1, -0.7, 0])]
+                # LineDivider((0.0, 0.0, 0)),]
     
-    # image_maker = TestImageMaker(image_size_wh=image_size)   
-    # image = image_maker.make_image('c_lines_5_rand')
-    image = _make_test_image()
+    #dividers = dividers_from_model(r'test_test\SYNTH_bw_lines_test_model_2l_4c.pkl')
+    #dividers = dividers_from_model(r'test_test_circles\SYNTH_bw_circles_test_model_2c_4c.pkl')
+                                   # test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl
+    dividers = dividers_from_model(r'test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl')
+    #dividers = dividers_from_model(r'test_barn\barn_model_16l_64c.pkl')
+    image_maker = TestImageMaker(image_size_wh=image_size)   
+    #image = image_maker.make_image('c_lines_5_rand')
+    lines = {'centers': np.array([[0.0, 0.0001], [0.0, -0.0]]),
+            'angles': np.array([0, np.pi/2])}
+    #image = image_maker._synth_spec_image(lines=lines, is_color=False)
+    image = image_maker.make_image('static_line_bw')
+
+    
+    
+    
+    
+    # image = _make_test_image()
     # image = cv2.resize(image, (image_size[0], image_size[1]), interpolation=cv2.INTER_AREA)
     ce = ColorEncoding(dividers)
-    
+    print("Testing on input image:  %s  %s" % ('barn.png', str(image.shape)))
     
     ce.train_image(image)
     aspect, xlim, ylim = get_aspect_and_lims(image.shape)
@@ -439,3 +554,4 @@ if __name__ == "__main__":
     # test_approx_code_lookup()
     test_make_LUT()
 
+    

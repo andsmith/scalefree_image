@@ -372,8 +372,8 @@ def pixels_in_bbox(bbox, pixels_xy):
     """
     print(pixels_xy.shape)
     x_min, y_min, x_max, y_max = bbox['x'][0], bbox['y'][0], bbox['x'][1], bbox['y'][1]
-    inside = np.any((pixels_xy[:,0] >= x_min) & (pixels_xy[:,0] <= x_max) &
-                    (pixels_xy[:,1] >= y_min) & (pixels_xy[:,1] <= y_max))
+    inside = np.any((pixels_xy[:,0] >= x_min) & (pixels_xy[:,0] < x_max) &
+                    (pixels_xy[:,1] >= y_min) & (pixels_xy[:,1] < y_max))
     return inside
 
 def test_pixels_in_bbox():
@@ -445,7 +445,7 @@ if __name__ == "__main__":
     # test_add_text()
     # test_make_input_grid()
     # #test_make_central_weights()
-    test_poly_expand_features()
+    # test_poly_expand_features()
     # test_pairwise_hamming()
     # test_find_boundary_pixels()
     test_pixels_in_bbox()

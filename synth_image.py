@@ -61,7 +61,7 @@ class TestImageMaker(object):
         
         center = center[::-1]  # xy to yx
 
-        center[1] = -center[1]  # invert y axis
+        # center[1] = -center[1]  # invert y axis
         y_grid, x_grid = make_input_grid((self._wh[1], self._wh[0]), resolution=1)
         # Compute the circle mask
         circle_mask = (y_grid - center[1]) ** 2 + (x_grid - center[0]) ** 2 - radius ** 2
@@ -76,12 +76,11 @@ class TestImageMaker(object):
         it should be the same dimensions as the image.
         """
         
-        center = center[::-1]  # xy to yx
-
-        center[1] = -center[1]  # invert y axis
-        y_grid, x_grid = make_input_grid((self._wh[1], self._wh[0]), resolution=1)
+        # import ipdb; ipdb.set_trace()
+        center[1] = -center[1]  # invert y axis?
+        x_grid, y_grid = make_input_grid((self._wh[1], self._wh[0]), resolution=1)
         # Compute the line mask
-        angle_rad -= np.pi / 2  # rotate by 90 degrees to get normal vector
+        #angle_rad -= np.pi / 2  # rotate by 90 degrees to get normal vector
         line_mask = (y_grid - center[1]) * np.cos(angle_rad) - (x_grid - center[0]) * np.sin(angle_rad)
         mask = np.where(line_mask >= 0, 1, -1)
         if center_size > 0:
@@ -125,19 +124,31 @@ class TestImageMaker(object):
         return self._mask_to_image_gray(mask)
 
     def _synth_static_line_bw(self):
-        angle = np.pi/2 -np.pi/16# np.random.uniform(0, np.pi/8)
+        angle = np.pi/2 + np.pi/32
         center = np.array([0.5, 0.0])
         mask = self._make_line_mask(angle, center)
         return self._mask_to_image_color(mask)
     
     def _synth_bw_lines_test(self):
-        angle1 = np.pi/2 
-        center1 = np.array([0.0, 0.0])
-        angle2 = 0
-        center2 = np.array([0.0, 0.0])
+        angle1 = np.pi/32
+        center1 = np.array([0., 0.666])
+        
+        angle2 = np.pi/2 + np.pi/16
+        center2 = np.array([-0.7, 0.0])
         mask1 = self._make_line_mask(angle1, center1)
         mask2 = self._make_line_mask(angle2, center2)
-        combined_mask = mask1*10 + mask2
+        combined_mask = mask1 *10 + mask2
+        return self._mask_to_image_gray(combined_mask)
+    
+    def _synth_bw_circles_test(self):
+        rad1 = .2
+        center1 = np.array([-0.8, 0.2])
+        
+        rad2 = .3
+        center2 = np.array([-0.7, 0.0])
+        mask1 = self._make_circle_mask(center1, rad1,center_size=0)
+        mask2 = self._make_circle_mask(center2, rad2,center_size=0)
+        combined_mask = mask1 *10 + mask2
         return self._mask_to_image_gray(combined_mask)
     
     
@@ -353,7 +364,7 @@ def test_single9(name='mix_64_rand'):
     plt.axis('off')
     plt.show()
 
-def test_images():
+def plot_all_images():
     maker = TestImageMaker((640,480))
     test_types = maker.get_types()
     logging.info("Available test image types: %s" % (test_types,))
@@ -388,22 +399,24 @@ def test_images():
     plt.show()
     
 def test_spec_image():
-    lines = {'centers': np.array([[0.0, 0.2], [0.0, -0.2]]),
-             'angles': np.array([0, 1])}
-    tim = TestImageMaker((100,300))
-    img = tim._synth_spec_image(lines=lines, is_color=False)
+    lines = {'centers': np.array([[0.0, 0.0001], [0.0, -0.0]]),
+             'angles': np.array([0, np.pi/2])}
+    tim = TestImageMaker((100,100))
+    #img = tim._synth_spec_image(lines=lines, is_color=False)
+    img = tim._synth_bw_lines_test()
     plt.figure(figsize=(6,6))
     plt.imshow(img, cmap='gray' if img.ndim==2 else None)
     plt.title("spec_image", fontsize=16)
     # plt.axis('off')
     # invert y-axis
-    plt.gca().invert_yaxis()
+    # plt.gca().invert_yaxis()
     plt.show()  
     
     
     
 if __name__=="__main__":
     logging.basicConfig(level=logging.INFO)
-    # test_images()
+    plot_all_images()
+    
     # test_single9()
-    test_spec_image()
+    # test_spec_image()

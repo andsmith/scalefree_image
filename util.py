@@ -362,7 +362,10 @@ def find_boundary_pixels(mask):
     # bm_temp[:,-1] |= mask[:,-1]
     
     print("Mean boundary mask value:", bm_temp.mean())
-    return np.where(bm_temp)
+    coords =  np.where(bm_temp)
+    # convert to N x 2 array of coordinates
+    pixels_xy = np.hstack((coords[1].reshape(-1,1), coords[0].reshape(-1,1)))
+    return  pixels_xy
 
 def pixels_in_bbox(bbox, pixels_xy):
     """

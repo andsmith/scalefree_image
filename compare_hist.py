@@ -39,25 +39,43 @@ class LossComparison(object):
                 continue
             hist[d] = meta
             logging.info("Loaded history from %s with %d entries" % (d, len(meta['loss_history'])))
-            # # show top level keys
-            # for k in meta.keys():
-            #     logging.info("  %s: %s" % (k, str(meta[k])[:100]))
-
-            # # import ipdb; ipdb.set_trace()
 
             hist[d]['epoch_mean_losses'] = [[np.mean(epoch_minibatch_losses)  for epoch_minibatch_losses in cycle['epochs']] for cycle in meta['loss_history']]
         return hist
+    
+    def _check_include_annealing(self):
+        has_anneal = False
+        for d, meta in self.hist.items():
+        
+            anneal = np.array(meta['anneal_history']).flatten()
+            if np.any(anneal > 0):
+                has_anneal = True
+                break
+        logging.info("Annealing detecte:  %s" % has_anneal)
+        
+        return has_anneal
     
     def plot(self):
         """
         2 plots, shared x axis, learning rates and epoch mean losses.
         x-axis is cycles, different sized cycles will be squished/stretched to fit into a unit space for 1 cycle.
         """
-        grid = gridspec.GridSpec(nrows=3, ncols=1, height_ratios=[1,2,2])
-        fig = plt.figure(figsize=(10,6))
-        lrate_ax = fig.add_subplot(grid[0])
-        loss_ax = fig.add_subplot(grid[1], sharex=lrate_ax)
-        epoch_loss_ax = fig.add_subplot(grid[2], sharex=lrate_ax)
+        
+        if not self._check_include_annealing():    
+            grid = gridspec.GridSpec(nrows=3, ncols=1, height_ratios=[1,2,2])
+            fig = plt.figure(figsize=(10,6))
+            lrate_ax = fig.add_subplot(grid[0])
+            loss_ax = fig.add_subplot(grid[1], sharex=lrate_ax)
+            epoch_loss_ax = fig.add_subplot(grid[2], sharex=lrate_ax)
+            anneal_ax = None
+        else:
+            
+            grid = gridspec.GridSpec(nrows=4, ncols=1, height_ratios=[1,1,2,2])
+            fig = plt.figure(figsize=(10,6))
+            lrate_ax = fig.add_subplot(grid[0])
+            anneal_ax = fig.add_subplot(grid[1], sharex=lrate_ax)
+            loss_ax = fig.add_subplot(grid[2], sharex=lrate_ax)
+            epoch_loss_ax = fig.add_subplot(grid[3], sharex=lrate_ax)
     
         
         epoch_loss_ax.set_yscale('log')
@@ -66,6 +84,10 @@ class LossComparison(object):
         lrate_ax.set_ylabel("Learning Rate")
         lrate_ax.set_yscale('log')
         # epoch_loss_ax.set_xlabel("(time normalized over all cycles)")
+        
+        if anneal_ax is not None:
+            anneal_ax.set_ylabel("Annealing Noise SD")
+            anneal_ax.set_yscale('log')
         
         best_loss = np.inf
         best_label = None
@@ -99,12 +121,20 @@ class LossComparison(object):
             # plot losses
             epoch_loss_x = []
             epoch_loss_y = []
+            anneal_x, anneal_y = [], []
             for cyc_i, cycle in enumerate(epoch_mean_losses):
                 eml_x = np.linspace(0, 1, len(cycle), endpoint=False) + cyc_i
                 epoch_loss_x.extend(eml_x)
                 epoch_loss_y.extend(cycle)
+                if anneal_ax is not None:
+                    anneal_x.extend(eml_x)
+                    anneal_y.extend( meta['anneal_history'][cyc_i])
             epoch_loss_x = np.array(epoch_loss_x) 
             epoch_loss_y = np.array(epoch_loss_y)
+            if anneal_ax is not None:
+                anneal_x = np.array(anneal_x)
+                anneal_y = np.array(anneal_y)
+                anneal_ax.plot(anneal_x, anneal_y, color=line.get_color(), linestyle='-', label=loss_label)
             loss_line = epoch_loss_ax.plot(epoch_loss_x , epoch_loss_y, color=line.get_color())[0]
             
             final_loss = epoch_loss_y[-1]

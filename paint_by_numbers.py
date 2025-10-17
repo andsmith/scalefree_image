@@ -398,10 +398,14 @@ class ColorEncoding(object):
         
         
         n_pixels = 0
-        pruned = [prune_mask(reg) for reg in regions]
 
-        for i,pruned_region in enumerate(pruned):
-            pruned_mask, offset_yx = pruned_region['mask'], pruned_region['offset']
+        for i,region in enumerate(regions):
+            print(region.mask.astype(int))
+            print(region.bbox)
+            import ipdb; ipdb.set_trace()
+            
+            
+            pruned_mask, offset_yx = region.mask, (region.bbox['y'][0], region.bbox['x'][0])
             n_pixels += np.sum(pruned_mask)
             mask_h, mask_w = pruned_mask.shape
             target_region = target_image[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w, :].reshape(mask_h, mask_w)
@@ -488,17 +492,17 @@ def get_aspect_and_lims(shape):
         
     return aspect, xlim, ylim
 
-def test_make_LUT(image_size=(200,200), n_circles=0, n_lines=2):
+def test_make_LUT(image_size=(20,20), n_circles=0, n_lines=2):
     # dividers = [LineDivider.make_rand() for _ in range(n_lines)] + \
     #            [CircleDivider.make_rand() for _ in range(n_circles)]
                
     dividers = [LineDivider([0.1, -0.7, 0])]
                 # LineDivider((0.0, 0.0, 0)),]
     
-    # dividers = dividers_from_model(r'test_test\SYNTH_bw_lines_test_model_2l_4c.pkl')
+    dividers = dividers_from_model(r'test_test\SYNTH_bw_lines_test_model_2l_4c.pkl')
     #dividers = dividers_from_model(r'test_test_circles\SYNTH_bw_circles_test_model_2c_4c.pkl')
                                    # test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl
-    dividers = dividers_from_model(r'test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl')
+    # dividers = dividers_from_model(r'test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl')
     # dividers = dividers_from_model(r'test_barn\barn_model_16l_64c.pkl')
     image_maker = TestImageMaker(image_size_wh=image_size)   
     #image = image_maker.make_image('c_lines_5_rand')

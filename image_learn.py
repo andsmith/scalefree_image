@@ -118,33 +118,47 @@ class UIDisplay(object):
             meta_filename = self.get_filename('metadata')
             if self._frame_dir is not None:
                 meta_filename = os.path.join(self._frame_dir, meta_filename)
+                
+            else:
+                # use state_file's absolute path
+                meta_path = os.path.dirname(os.path.abspath(state_file))
+                meta_filename = os.path.join(meta_path, os.path.basename(meta_filename))
             if os.path.exists(meta_filename):
+                # try:
                 with open(meta_filename, 'r') as f:
                     metadata = json.load(f)
-                logging.info("Loaded metadata from:  %s" % (meta_filename,))
-                self._metadata = metadata['frames']  if 'frames' in metadata else metadata
-                
-                if 'anneal_history' in metadata:
-                    self._anneal_history = metadata['anneal_history'] 
-                    logging.info("Loaded anneal history with %i entries." % (len(self._anneal_history),))
-                else:
-                    logging.warning("Metadata found but contains no anneal history")
-                    self._anneal_history = []
-                
-                if 'loss_history' in metadata:
-                    self._loss_history = metadata['loss_history'] 
-                    logging.info("Loaded loss history with %i entries." % (len(self._loss_history),))
-                    self.curr_loss = np.mean([np.mean(epoch_loss) for epoch_loss in self._loss_history[-1]['epochs']]) if len(self._loss_history)>0 else -1
-                else:
-                    logging.warning("Metadata found but contains no loss history")
-                    self._loss_history = []
+
+                # except json.decoder.JSONDecodeError:
+                #     logging.warning("Metadata file %s is corrupted, ignoring." % (meta_filename,))
+                #     metadata = None
                     
-                if 'learning_rate_history' in metadata:
-                    self._l_rate_history = metadata['learning_rate_history'] if 'learning_rate_history' in metadata else []
-                    logging.info("Loaded learning rate history with %i entries." % (len(self._l_rate_history),))
-                else:
-                    logging.warning("Metadata found but contains no learning rate history")
-                    self._l_rate_history = []
+                    
+                    
+                if metadata is not None:    
+                    logging.info("Loaded metadata from:  %s" % (meta_filename,))
+                    self._metadata = metadata['frames']  if 'frames' in metadata else metadata
+                    
+                    if 'anneal_history' in metadata:
+                        self._anneal_history = metadata['anneal_history'] 
+                        logging.info("Loaded anneal history with %i entries." % (len(self._anneal_history),))
+                    else:
+                        logging.warning("Metadata found but contains no anneal history")
+                        self._anneal_history = []
+                    
+                    if 'loss_history' in metadata:
+                        self._loss_history = metadata['loss_history'] 
+                        logging.info("Loaded loss history with %i entries." % (len(self._loss_history),))
+                        self.curr_loss = np.mean([np.mean(epoch_loss) for epoch_loss in self._loss_history[-1]['epochs']]) if len(self._loss_history)>0 else -1
+                    else:
+                        logging.warning("Metadata found but contains no loss history")
+                        self._loss_history = []
+                        
+                    if 'learning_rate_history' in metadata:
+                        self._l_rate_history = metadata['learning_rate_history'] if 'learning_rate_history' in metadata else []
+                        logging.info("Loaded learning rate history with %i entries." % (len(self._l_rate_history),))
+                    else:
+                        logging.warning("Metadata found but contains no learning rate history")
+                        self._l_rate_history = []
             else:
                 logging.info("No metadata file found:  %s" % (meta_filename,))
 

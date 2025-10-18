@@ -32,6 +32,7 @@ class LossComparison(object):
             meta_path = os.path.join(d, meta_path[0])
             if not os.path.exists(meta_path):
                 raise ValueError("Metadata file %s does not exist" % meta_path)
+            logging.info("Loading history from %s" % meta_path)
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
             if 'loss_history' not in meta:

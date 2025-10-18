@@ -32,7 +32,7 @@ class EdgeFinder(object):
         self.n_levels = n_levels
         self.build_pyramid()
         self.make_edge_masks()
-        self._level_offsets = self.optimize()
+        
         
     def make_edge_masks(self):
         self.edge_masks = []
@@ -69,62 +69,7 @@ class EdgeFinder(object):
         etc.
         """
         level_offsets = []
-        offset_max_per_level = [2**(self.n_levels - l -1) for l in range(self.n_levels)]
-        bounds = [(-om, om) for om in offset_max_per_level for _ in range(2)]
-
-        init_vals = [0 for _ in range(2*self.n_levels)]
         
-        def objective(offsets_flat):
-            """
-                Objective function:  Maximize (minimize negative of) the number of pixels with full support,
-                i.e. over all levels.
-            """
-            offsets = [(offsets_flat[2*l], offsets_flat[2*l+1]) for l in range(self.n_levels)]
-            combined_mask = np.zeros_like(self.edge_masks[0], dtype=np.uint8)
-            for l in range(self.n_levels):
-                off_x, off_y = offsets[l]
-                off_x = int(round(off_x))
-                off_y = int(round(off_y))
-                edge_mask = self.edge_masks[l]
-                # shift edge mask by off_x, off_y
-                M = np.float32([[1, 0, off_x], [0, 1, off_y]])
-                shifted_mask = cv2.warpAffine(edge_mask, M, (edge_mask.shape[1], edge_mask.shape[0]), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-                combined_mask += shifted_mask
-            # Objective is negative of sum of combined mask (we want to maximize sum)
-            n_edge_px = np.sum(combined_mask >= self.n_levels)
-            print("Evaluated objective -> n_edge_px=", n_edge_px)
-            return -n_edge_px
-        
-        # # Before minimizing, test on 1000 random offset sets:
-        # trials = []
-        # # start with no offsets
-        # trials.append([0 for _ in range(2*self.n_levels)])
-        # for test_i in range(1000):
-        #     test_offsets = []
-        #     for l in range(self.n_levels):
-        #         om = offset_max_per_level[l]
-        #         off_x = np.random.randint(-om, om)
-        #         off_y = np.random.randint(-om, om)
-        #         test_offsets.append((off_x, off_y))
-        #     test_offsets_flat = [val for pair in test_offsets for val in pair]
-        #     trials.append(test_offsets_flat)
-        # trial_dists = [np.sum(np.abs(np.array(test_offsets))) for test_offsets in trials]
-        # # sort trial by distance from zero
-        # sorted_trials = [trial for _, trial in sorted(zip(trial_dists, trials))]
-        # results = [objective(test_offsets) for test_offsets in sorted_trials]
-        # best_i = np.argmin(results)
-        # print("Best trial before optimization: ", sorted_trials[best_i], " with objective ", results[best_i])
-        # test_i = best_i
-        # obj_val = objective(test_offsets_flat)
-        # print(f"Test {test_i}: objective={obj_val}")
-        
-        
-        
-        res = minimize(objective, init_vals, bounds=bounds, method ='NELDER-MEAD', options={'maxiter': 20000})
-        print("Optimization result: ", res)
-        final_offsets = [(res.x[2*l], res.x[2*l+1]) for l in range(self.n_levels)]
-        print("Final offsets per level: ", final_offsets)
-        return final_offsets
 
 
 

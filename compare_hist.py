@@ -14,8 +14,17 @@ import logging
 
 
 class LossComparison(object):
-    
-    def __init__(self, frame_dirs, title="Loss Comparison"):
+
+    def __init__(self, frame_dirs, title="Loss Comparison", max_cycles=None):
+        """ 
+        Plot end-of-cycle loss for all experiments loaded.
+        Optionally plot learning rate, annealing noise (sd), and epoch losses as well.
+        frame_dirs: list of directories containing metadata json files with loss histories
+        title: Title for the plot
+        max_cycles: maximum number of cycles to plot (None for all)
+        """
+        self.max_cycles = max_cycles
+        
         self.frame_dirs = frame_dirs
         self.title = title
         
@@ -77,11 +86,15 @@ class LossComparison(object):
             
             print("PLOTTING", d)
             label = d[2:-1]
-            loss_label = "%s (%i cycles)" % (label, len(meta['epoch_mean_losses']))
+            
+            n_cycles = len(meta['epoch_mean_losses']) if self.max_cycles is None else min(self.max_cycles, len(meta['epoch_mean_losses']))
+
+            loss_label = "%s (%i cycles)" % (label, n_cycles)
             self.labels.append(label)
-            epoch_mean_losses = meta['epoch_mean_losses']
-            learning_rates = meta['learning_rate_history']
+            epoch_mean_losses = meta['epoch_mean_losses'][:n_cycles]
+            learning_rates = meta['learning_rate_history'][:n_cycles]
             total_epochs = len(epoch_mean_losses)
+
 
             cycle_x = np.arange(total_epochs) #/ total_epochs
             lr_y = np.array(learning_rates)
@@ -93,7 +106,7 @@ class LossComparison(object):
             
             # Plot end of cycle losses:
             eoc_loss_x = cycle_x
-            eoc_loss_y = np.array([cycle['final_loss'] for cycle in meta['loss_history']])
+            eoc_loss_y = np.array([cycle['final_loss'] for cycle in meta['loss_history'][:n_cycles]])
             loss_ax.plot(eoc_loss_x, eoc_loss_y,  linestyle='-', color=line.get_color(), label=loss_label)
             
             
@@ -148,9 +161,10 @@ def get_args():
     parser.add_argument('frame_dirs', type=str, nargs='+',
                         help='Directories containing *metadata*.json files with loss histories')
     parser.add_argument('--title', type=str, default="Loss Comparison", help="Title for the plot")
+    parser.add_argument('-m', '--max_cycles', type=int, default=None, help="Maximum number of cycles to plot")
     parsed = parser.parse_args()
     dirs = parsed.frame_dirs
-    args = {'frame_dirs': dirs, 'title': parsed.title}
+    args = {'frame_dirs': dirs, 'title': parsed.title, 'max_cycles': parsed.max_cycles}
     return args
     
 if __name__=="__main__":

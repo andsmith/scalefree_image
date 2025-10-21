@@ -231,7 +231,7 @@ def dividers_from_model(filename):
     if n_div['linear']>0:
         centers = weights[w_i]
         angles = weights[w_i+1].reshape(-1,1)
-        print(centers.shape,angles.shape)
+        
         param_arr = np.concatenate([centers, angles], axis=1)
         
         dividers.extend([LineDivider(param_arr[i]) for i in range(n_div['linear'])])
@@ -304,9 +304,9 @@ class ColorEncoding(object):
         colors = colors_flat.reshape(data_shape + (3,))
         return colors
 
-    def render_regions(self, regions, size_wh, ax=None):
+    def make_region_map(self, regions, size_wh, ax=None, plot=True):
         """
-        Create a full size array, add each reagion mask to it with a different index.
+        Create a full size array, add each region mask to it with a different index.
         """
         w, h = size_wh
         region_img = np.zeros((h, w), dtype=np.int32) - 1
@@ -314,31 +314,35 @@ class ColorEncoding(object):
             x_min, y_min, x_max, y_max = region.bbox['x'][0], region.bbox['y'][0], region.bbox['x'][1], region.bbox['y'][1]
             region_img[y_min:y_max, x_min:x_max][region.mask] = i
 
-
-        aspect, xlim, ylim = get_aspect_and_lims(region_img.shape)
+        if not plot:
+            return region_img
+        
+        self.aspect, self.xlim, self.ylim = get_aspect_and_lims(region_img.shape)
         if ax is None:
             _, ax = plt.subplots(1, 1, figsize=(6,6))
-        
-        ax.imshow(region_img, cmap='tab20', extent = (xlim[0], xlim[1], ylim[0], ylim[1]))
+
+        ax.imshow(region_img, cmap='tab20', extent = (self.xlim[0], self.xlim[1], self.ylim[0], self.ylim[1]))
 
         for divider in self.dividers:
-            divider.plot(ax, xlim, ylim)
+            divider.plot(ax, self.xlim, self.ylim)
                 
         # add colorbar
         cbar = plt.colorbar(mappable=plt.cm.ScalarMappable(cmap='tab20'), ax=ax, fraction=0.046, pad=0.04, ticks=np.arange(-0.5, len(regions), 1))
         ax.set_title(f"Regions: {len(regions)}")
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
+        ax.set_xlim(self.xlim)
+        ax.set_ylim(self.ylim)
         ax.set_aspect('equal')
+        
+        return region_img
     
     def train_image(self, target_image):
         h, w = target_image.shape[0], target_image.shape[1]
 
         regions = self._find_regions(h, w)
-        self.render_regions(regions, (w,h))
+        region_map = self.make_region_map(regions, (w,h))
         plt.show()
 
-        self._codes, self._colors = self._optimize_colors(target_image, regions)
+        self._codes, self._colors = self._optimize_colors(target_image, regions, region_map)
         self._LUT = {tuple(self._codes[i]): self._colors[i] for i in range(self._codes.shape[0])}
 
     def _find_regions(self, h, w):
@@ -387,28 +391,27 @@ class ColorEncoding(object):
         print(f"Found {len(regions)} regions from {len(self.dividers)} dividers.")
         return regions  
 
-    def _optimize_colors(self, target_image, regions):
+    def _optimize_colors(self, target_image, regions, region_map):
         """        
         Optimize the colors for each region based on the target image.
+        Since all pixels in the same region have the same code we can just compute the code
+        for one example from each region to get the code -> color mapping.
+        
         """
         h, w = target_image.shape[0], target_image.shape[1]
         colors = np.zeros((len(regions), 3), dtype=np.uint8)
         codes = np.zeros((len(regions), self._n_codewords), dtype=self._ENCODING_TYPE)
         print(f"\n\n\nOptimizing colors for {len(regions)} regions.")
-        
+        import ipdb; ipdb.set_trace()
         
         n_pixels = 0
-
+        
+        # first extract the average color in each region
         for i,region in enumerate(regions):
-            print(region.mask.astype(int))
-            print(region.bbox)
-            import ipdb; ipdb.set_trace()
-            
-            
             pruned_mask, offset_yx = region.mask, (region.bbox['y'][0], region.bbox['x'][0])
             n_pixels += np.sum(pruned_mask)
             mask_h, mask_w = pruned_mask.shape
-            target_region = target_image[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w, :].reshape(mask_h, mask_w)
+            target_region = target_image[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w, :].reshape(mask_h, mask_w, 3)
             region_pixels = target_region[pruned_mask]
 
             
@@ -420,16 +423,29 @@ class ColorEncoding(object):
             else:
                 print(f"WARNING: Region {i} has no pixels in the target image.")
                 colors[i] = np.array([0, 0, 0], dtype=np.uint8)  # default to black if no pixels
-            
-            for bit_place, divider in enumerate(self.dividers):
-                div_mask = divider.make_mask_set((h, w))
-                div_region = div_mask[offset_yx[0]:offset_yx[0]+mask_h, offset_yx[1]:offset_yx[1]+mask_w]
-                side = np.logical_and(pruned_mask, div_region)
-                if np.any(side):
-                    byte_index = bit_place // self._ENCODING_BITS
-                    bit_index = bit_place % self._ENCODING_BITS
-                    codes[i, byte_index] |= (1 << bit_index)
-                    
+        
+        # now get codes for each region
+        
+        for i, region in enumerate(regions):
+            # find one pixel in the region to get its code
+            pruned_mask, offset_yx = region.mask, (region.bbox['y'][0], region.bbox['x'][0])
+            mask_h, mask_w = pruned_mask.shape
+            ys, xs = np.where(pruned_mask)
+            if len(ys) == 0:
+                print(f"WARNING: Region {i} has no pixels to get code from.")
+                continue
+            y_sample = ys + offset_yx[0]
+            x_sample = xs + offset_yx[1]
+            x_pixel = (x_sample / w) * (self.xlim[1] - self.xlim[0]) + self.xlim[0]
+            y_pixel = (y_sample / h) * (self.ylim[1] - self.ylim[0]) + self.ylim[0]
+            region_codes = self.encode_xy_points(np.array([x_pixel]), np.array([y_pixel]))
+            # Make sure they're all the same code
+            if np.unique(region_codes.flatten()).shape[0] > 1:
+                print(f"WARNING: Region {i} has multiple codes for its pixels, using the first one.")
+            code = region_codes[0]
+            codes[i] = code[0]
+            print(f"Region {i}: sample pixel ({x_pixel[0]}, {y_pixel[0]}), code {codes[i]}")
+        print(f"Optimized colors for {len(regions)} regions, total pixels: {n_pixels}\n\n\n")
         return codes, colors
 
 def _make_test_image():
@@ -492,24 +508,28 @@ def get_aspect_and_lims(shape):
         
     return aspect, xlim, ylim
 
-def test_make_LUT(image_size=(20,20), n_circles=0, n_lines=2):
+def test_make_LUT(image_size=(128,96), n_circles=0, n_lines=5):
     # dividers = [LineDivider.make_rand() for _ in range(n_lines)] + \
     #            [CircleDivider.make_rand() for _ in range(n_circles)]
                
-    dividers = [LineDivider([0.1, -0.7, 0])]
-                # LineDivider((0.0, 0.0, 0)),]
+    # dividers = [LineDivider([0.1, -0.7, 0])]
+    #             # LineDivider((0.0, 0.0, 0)),]
     
-    dividers = dividers_from_model(r'test_test\SYNTH_bw_lines_test_model_2l_4c.pkl')
-    #dividers = dividers_from_model(r'test_test_circles\SYNTH_bw_circles_test_model_2c_4c.pkl')
+    # dividers = dividers_from_model(r'test_test\SYNTH_bw_lines_test_model_2l_4c.pkl')
+    # dividers = dividers_from_model(r'test_test_circles\SYNTH_bw_circles_test_model_2c_4c.pkl')
                                    # test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl
     # dividers = dividers_from_model(r'test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl')
-    # dividers = dividers_from_model(r'test_barn\barn_model_16l_64c.pkl')
-    image_maker = TestImageMaker(image_size_wh=image_size)   
-    #image = image_maker.make_image('c_lines_5_rand')
-    lines = {'centers': np.array([[0.0, 0.0001], [0.0, -0.0]]),
-            'angles': np.array([0, np.pi/2])}
-    #image = image_maker._synth_spec_image(lines=lines, is_color=False)
-    image = image_maker.make_image('static_line_bw')
+    dividers = dividers_from_model(r'blah\SYNTH_c_lines_5_rand_train_5l_10t_10c_model_5l_10t_10c.pkl')
+    
+    
+    image = cv2.imread('blah\SYNTH_c_lines_5_rand_train_5l_10t_10c_train_5l_10t_10c.png')[:,:,::-1]
+
+    
+    # image = image_maker.make_image('c_lines_5_rand')
+    # lines = {'centers': np.array([[0.0, 0.0001], [0.0, -0.0]]),
+    #         'angles': np.array([0, np.pi/2])}
+    # image = image_maker._synth_spec_image(lines=lines, is_color=False)
+    # image = image_maker.make_image('static_line_bw')
     
     # image = _make_test_image()
     # image = cv2.resize(image, (image_size[0], image_size[1]), interpolation=cv2.INTER_AREA)
@@ -517,27 +537,38 @@ def test_make_LUT(image_size=(20,20), n_circles=0, n_lines=2):
     print("Testing on input image:  %s  %s" % ('barn.png', str(image.shape)))
     
     ce.train_image(image)
-    aspect, xlim, ylim = get_aspect_and_lims(image.shape)
-    img_extent = (xlim[0], xlim[1], ylim[0], ylim[1])
-    x_orig, y_orig = make_input_grid(image.shape[:2], resolution=1.0, keep_aspect=True)
-    shape_big = np.array(image.shape[:2]) * 6
-    x, y = make_input_grid(shape_big, resolution=1.0, keep_aspect=True)
-    print(f"Encoding {x.size} points")
-    codes = ce.encode_xy_points(x, y)
-    print(f"Getting colors for {codes.shape[0]} codes (shape {codes.shape})")
-    colors = ce.get_colors(codes)
-    print(f"Got {colors.shape[0]} colors")
-    colors_img = colors.reshape(shape_big[0], shape_big[1], 3)
-    fig,ax=plt.subplots(1, 2, figsize=(12, 6))
-    ax[0].imshow(image, extent=img_extent)
-    ax[0].plot(x_orig.flatten(), y_orig.flatten(), 'r.', markersize=1)
-    ax[0].set_title("Original Image")
-    ax[0].set_aspect('equal')
-    ax[1].imshow(colors_img, extent=img_extent)
-    ax[1].plot(x_orig.flatten(), y_orig.flatten(), 'r.', markersize=1)
-    ax[1].set_title("Encoded Colors")
-    ax[1].set_aspect('equal')   
-    plt.show()
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    # aspect, xlim, ylim = get_aspect_and_lims(image.shape)
+    # img_extent = (xlim[0], xlim[1], ylim[0], ylim[1])
+    # x_orig, y_orig = make_input_grid(image.shape[:2], resolution=1.0, keep_aspect=True)
+    # shape_big = np.array(image.shape[:2]) * 6
+    # x, y = make_input_grid(shape_big, resolution=1.0, keep_aspect=True)
+    # print(f"Encoding {x.size} points")
+    # codes = ce.encode_xy_points(x, y)
+    # print(f"Getting colors for {codes.shape[0]} codes (shape {codes.shape})")
+    # colors = ce.get_colors(codes)
+    # print(f"Got {colors.shape[0]} colors")
+    # colors_img = colors.reshape(shape_big[0], shape_big[1], 3)
+    # fig,ax=plt.subplots(1, 2, figsize=(12, 6))
+    # ax[0].imshow(image, extent=img_extent)
+    # ax[0].plot(x_orig.flatten(), y_orig.flatten(), 'r.', markersize=1)
+    # ax[0].set_title("Original Image")
+    # ax[0].set_aspect('equal')
+    # ax[1].imshow(colors_img, extent=img_extent)
+    # ax[1].plot(x_orig.flatten(), y_orig.flatten(), 'r.', markersize=1)
+    # ax[1].set_title("Encoded Colors")
+    # ax[1].set_aspect('equal')   
+    # plt.show()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

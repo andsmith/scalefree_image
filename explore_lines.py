@@ -59,12 +59,11 @@ Tab 1: Line finding has 3 views
     +----------------------------------------------+
     | [Ps1--]    [CHs1--]   [CHs4----]  [CHs7----] |
     | [Ps2---]   [CHs2--]   [CHs5----]             |
-    | [Ps3---]   [CHs3--]   [CHs6----]   [apply]   | 
+    | [Ps3---]   [CHs3--]   [CHs6----]      | 
     |{show pre} {show edg}  {show lines}           |                        |
     +----------------------------------------------+
 
     "Show" buttons switch views in the image area.
-    "Apply" button runs the hough transform w/current params.
     Changes to other params (preprocessing or canny edges) automatically update the image display.
 
 
@@ -82,40 +81,43 @@ Tab 1: Line finding has 3 views
     +-----------------------------------+
 
 """
-LAYOUT = {'dims': {'min_size_wh': (640, 480),
+LAYOUT = {'dims': {'min_size_wh': (875, 480),
                    #'tab_image_size_wh': (800, 600),
-                   'ctrl_height_px': 265,
+                   'ctrl_height_px': 275,
+                   'status_height_px': 30,
                    'canny_x_split_rel': 0.3,
                    'hough_x_split_rel': 0.7,},
-          'fonts': {'tabs': {'name': 'TNotebook.Tab','params': {'family': 'Arial', 'size': 24, 'weight': 'bold'}},
+          'fonts': {'tabs': {'name': 'TNotebook.Tab','params': {'family': 'Arial', 'size': 14, 'weight': 'bold'}},
                     'sliders': {'name': 'TScale','params': {'family': 'Arial', 'size': 12}},
                     'buttons': {'name': 'TButton','params': {'family': 'Arial', 'size': 14, 'weight': 'bold'}},
-                    'checkButtons': {'name': 'TCheckbutton','params': {'family': 'Arial', 'size': 14}}
+                    'checkButtons': {'name': 'TCheckbutton','params': {'family': 'Arial', 'size': 14},},
+                    'status': {'name': 'TLabel','params': {'family': 'Arial', 'size': 12}},
+                    'headers': {'name': 'TLabel','params': {'family': 'Arial', 'size': 16, 'weight': 'bold'}},
                     },
           
           
           'tab_grid': dict(ctrl_rows=3, ctrl_cols=3,  # Layout of tab control/image area
+                           status_rows=1, status_cols=3,
                            img_rows=10, img_cols=3),
           
           'tabs': {
               'line_finding': {
                   'slider_params': [
                       {'row_col': (1, 0), 'name': 'pre_pyr_down_levels', 'label': 'Num. 2X downsamples', 'type': 'int', 'default': 1, 'range': (0, 10), 'length': 200},
-                      {'row_col': (2, 0), 'name': 'pre_gaussian_blur_ksize', 'label': 'Gaussian blur, kernel size', 'type': 'int', 'default': 5, 'range': (1, 15), 'odd_only': True, 'length': 200},
-                      {'row_col': (3, 0), 'name': 'pre_gaussian_blur_sigma', 'label': 'Gaussian blur, sigma', 'type': 'float', 'default': 1.0, 'range': (0.0, 5.0), 'length': 200},
+                      {'row_col': (2, 0), 'name': 'pre_gaussian_blur_ksize', 'label': 'Gaussian blur, kernel size', 'type': 'int', 'default': 30, 'range': (1, 50), 'odd_only': True, 'length': 200},
+                      {'row_col': (3, 0), 'name': 'pre_gaussian_blur_sigma', 'label': 'Gaussian blur, sigma', 'type': 'float', 'default': 1.0, 'range': (0.0, 6.0), 'length': 200},
                   
-                      {'row_col': (1, 1), 'name': 'canny_lower_thresh', 'label': 'Canny lower-threshold', 'type': 'int', 'default': 50, 'range': (0, 250), 'length': 200},
-                      {'row_col': (2, 1), 'name': 'canny_upper_thresh', 'label': 'Canny upper-threshold', 'type': 'int', 'default': 150, 'range': (0, 250), 'length': 200},
+                      {'row_col': (1, 1), 'name': 'canny_lower_thresh', 'label': 'lower-threshold', 'type': 'int', 'default': 50, 'range': (0, 1000), 'length': 200},
+                      {'row_col': (2, 1), 'name': 'canny_upper_thresh', 'label': 'upper-threshold', 'type': 'int', 'default': 150, 'range': (0, 1000), 'length': 200},
                       
-                      {'row_col': (1, 2), 'name': 'hough_rho_res', 'label': 'Hough rho-resolution', 'type': 'int', 'default': 1, 'range': (1, 5), 'length': 200},
-                      {'row_col': (2, 2), 'name': 'hough_theta_res_deg', 'label': 'theta-resolution (degrees)', 'type': 'float', 'default': 1.0, 'range': (0.5, 5.0), 'length': 200},
-                      {'row_col': (3, 2), 'name': 'hough_threshold', 'label': 'threshold', 'type': 'int', 'default': 50,  'range': (10, 200), 'length': 200},
-                      {'row_col': (1, 3), 'name': 'hough_min_line_length', 'label': 'min-line-length', 'type': 'int',  'default': 10,  'range': (5, 50), 'length': 200},
-                      {'row_col': (2, 3), 'name': 'hough_max_line_gap',    'label': 'max-line-gap',    'type': 'int',  'default': 30,  'range': (5, 100), 'length': 200},
+                      {'row_col': (1, 2), 'name': 'hough_rho_res', 'label': 'rho-resolution', 'type': 'int', 'default': 1, 'range': (1, 15), 'length': 200},
+                      {'row_col': (2, 2), 'name': 'hough_theta_res_deg', 'label': 'theta-resolution (degrees)', 'type': 'float', 'default': 1.0, 'range': (0.5, 15.0), 'length': 200},
+                      {'row_col': (3, 2), 'name': 'hough_threshold', 'label': 'threshold', 'type': 'int', 'default': 50,  'range': (1, 2000), 'length': 200},
+                      {'row_col': (1, 3), 'name': 'hough_min_line_length', 'label': 'min-line-length', 'type': 'int',  'default': 25,  'range': (5, 50), 'length': 200},
+                      {'row_col': (2, 3), 'name': 'hough_max_line_gap',    'label': 'max-line-gap',    'type': 'int',  'default': 5,  'range': (0, 30), 'length': 200},
                   ],
-                  'buttons': [{'row_col':(3,3), 'name': 'apply', 'label': 'apply'},],
                   
-                  'toggles': [{'row_col':(4,0), 'name': 'show_preprocessing', 'label': 'show image'},
+                  'toggles': [{'row_col':(3,1), 'name': 'show_preprocessing', 'label': 'show image'},
                               {'row_col':(4,1), 'name': 'show_canny_edges', 'label': 'show edges'},
                               {'row_col':(4,2), 'name': 'show_hough_lines', 'label': 'show lines'},],
                   
@@ -143,26 +145,76 @@ from PIL import Image, ImageTk
 import logging
 import sys
 from enum import IntEnum
+from find_lines import trim_image
+
+
+
+
+def pyr_down(image):
+    return( (image[::2, ::2].astype(int)+image[1::2, ::2]+image[::2, 1::2]+ image[1::2, 1::2]) //4).astype(np.uint8)
+
+
+
+def downsample(image, levels):
+    image = trim_image(image, n_pow_2=levels)
+    for _ in range(levels):
+        image = pyr_down(image)
+    return image
+def upsample(image, levels):    
+    block_template = np.ones((2,2),np.uint8)
+    print(image.shape, image.dtype)
+    for _ in range(levels):
+        image = cv2.merge((np.kron(image[:,:,0], block_template),
+                          np.kron(image[:,:,1], block_template),
+                          np.kron(image[:,:,2], block_template)))
+    print(image.shape, image.dtype)
+    return image.astype(np.uint8)
+def blur(image, ksize, sigma):
+    if sigma==0.0:
+        return image
+    if ksize % 2 == 0:
+        ksize += 1  # make odd
+    logging.info(f"Blurring image with ksize={ksize}, sigma={sigma}")
+    return cv2.GaussianBlur(image, (ksize, ksize), sigma)
+
+def get_canny_edges(image, lower_thresh, upper_thresh):
+    return cv2.Canny(image, lower_thresh, upper_thresh)
+
+def get_hough_lines(edges, rho_res, theta_res_deg, threshold, min_line_length, max_line_gap):
+    theta_res = np.deg2rad(theta_res_deg)
+    lines = cv2.HoughLinesP(edges, rho_res, theta_res, threshold,
+                            minLineLength=min_line_length,
+                            maxLineGap=max_line_gap)
+    return lines
+def unify_lines(pipeline, n_lines, band_width_px):
+    return None
+
+def render_dividers(pipeline, show_bands=False):
+    img = np.zeros_like(pipeline['downsampled'])
+    text = "Rendered dividers, bands " + ("shown" if show_bands else "hidden")
+    cv2.putText(img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    return img
+
+
 
 class ViewMode(IntEnum):
     # For tab 1, line finding.
     PREPROCESSING = 1
     CANNY_EDGES = 2
-    HOUGH_LINES = 3
 
 class ExploreLinesApp(tk.Tk):
     def __init__(self, image_path):
         super().__init__()
         self.title("Explore Lines App")
         self.mode = ViewMode.PREPROCESSING
+        self.showing_lines = False
         self._cur_tab = 'line_finding'
         
         self.image = cv2.imread(image_path)
         logging.info(f"Loaded image from {image_path} with shape {self.image.shape}")
-        self.original_image = self.image.copy()
         
         width = max(LAYOUT['dims']['min_size_wh'][0], self.image.shape[1])
-        height = max(LAYOUT['dims']['min_size_wh'][1], self.image.shape[0]) + LAYOUT['dims']['ctrl_height_px']
+        height = max(LAYOUT['dims']['min_size_wh'][1], self.image.shape[0] + LAYOUT['dims']['ctrl_height_px'])
 
         self.geometry(f"{width}x{height}")
         logging.info(f"App window size set to: {width}x{height}")
@@ -179,7 +231,7 @@ class ExploreLinesApp(tk.Tk):
         # tab_font = tkFont.Font(**LAYOUT['fonts']['tabs']['params'])
         # style.configure(LAYOUT['fonts']['tabs']['name'], font=tab_font)
             
-        custom_font = tkFont.Font(family="Arial", size=34, weight="bold")
+        custom_font = tkFont.Font(**LAYOUT['fonts']['tabs']['params'])
 
         # Configure the 'TNotebook.Tab' style to use the custom font
         style.configure("TNotebook.Tab", font=custom_font)
@@ -188,7 +240,6 @@ class ExploreLinesApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill='both', expand=True)
         
-
         self.tabs = {}
         
         for tab_name, tab_config in LAYOUT['tabs'].items():
@@ -196,15 +247,106 @@ class ExploreLinesApp(tk.Tk):
             self.notebook.add(tab_frame, text=tab_name.replace('_', ' ').title())
             tab_config['name'] = tab_name
             self.tabs[tab_name] = self.create_tab_content(tab_frame,  tab_config)
-        # set mode to preprocessing initially
+    
+        self.on_toggle('line_finding', 'show_preprocessing', True)
         
+        # set slider labels by changing the values (to their defaults)
+        for tab_name, tab in self.tabs.items():
+            for slider in tab['sliders']:
+                slider['scale'].set(getattr(self, slider['name']).get())
         
-        
-        
+        self._init_image_pipeline()
         
         self.update_image_display()
-        self.on_toggle('line_finding', 'show_preprocessing', True)
-            
+        
+        # set a callback for window resize events
+        # self.bind("<Configure>", self.on_resize)    
+        
+    # def on_resize(self, event):
+    #     self.update_image_display()
+        # logging.info("Window resized to: %dx%d" % (event.width, event.height))
+        
+
+    def render_hough_lines(self):
+        render_over_orig = self.tabs['line_finding']['toggles'][0]['var'].get()
+        print("RENDERING OVER ORIGINAL IMAGE:   ", render_over_orig)
+        
+        img = self.pipeline['original'].copy() if render_over_orig else self.pipeline['canny_edges_disp'].copy()
+        if self.pipeline['hough_lines'] is not None:
+            n_downsamples = self.pipeline['n_downsamples']
+            for line in self.pipeline['hough_lines']:
+                x1, y1, x2, y2 = line[0].astype(float) * (2**n_downsamples)
+                cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2, cv2.LINE_AA)
+        logging.info("Rendered %i lines on image" % (0 if self.pipeline['hough_lines'] is None else len(self.pipeline['hough_lines'])))
+        return img
+
+    def _update_preprocessing(self):
+        if not hasattr(self, 'pipeline'):
+            return
+        n_downsamples = self.tabs['line_finding']['sliders'][0]['var'].get()
+        kernel_size = self.tabs['line_finding']['sliders'][1]['var'].get()
+        kernel_sigma = self.tabs['line_finding']['sliders'][2]['var'].get()
+        logging.info("Updating preprocessed image with n_downsamples=%s, kernel_size=%s, kernel_sigma=%s" % (n_downsamples, kernel_size, kernel_sigma)    )
+        self.pipeline['original'] = self.image.copy()
+        self.pipeline['n_downsamples'] = n_downsamples
+        self.pipeline['downsampled'] = downsample(self.pipeline['original'], n_downsamples)
+        # upsample all display images to original size for consistent display
+        self.pipeline['downsampled_disp'] = upsample(self.pipeline['downsampled'], n_downsamples)
+        self.pipeline['blurred'] = blur(self.pipeline['downsampled'], kernel_size, kernel_sigma)
+        self.pipeline['blurred_disp'] = upsample(self.pipeline['blurred'], n_downsamples)
+        
+        status_str = "Image size:  %d x %d (after downsampling:  %d x %d) - Num Hough lines: %d" % (self.pipeline['original'].shape[1], self.pipeline['original'].shape[0],
+                                                                           self.pipeline['downsampled'].shape[1], self.pipeline['downsampled'].shape[0],
+                                                                           0 if 'hough_lines' not in self.pipeline or self.pipeline['hough_lines'] is None else len(self.pipeline['hough_lines']))    
+        self.tabs['line_finding']['status_label'].config(text=status_str)
+                
+    def _init_image_pipeline(self):     
+        self.pipeline = {}
+        self._update_preprocessing()
+        self._update_canny_edges()
+        self._update_hough_lines()
+        self._update_dividers()
+        
+        
+    def _update_canny_edges(self):
+        if not hasattr(self, 'pipeline'):
+            return
+        lower_thresh = self.tabs['line_finding']['sliders'][3]['var'].get()
+        upper_thresh = self.tabs['line_finding']['sliders'][4]['var'].get()
+        logging.info("Updating Canny edges with lower_thresh=%s, upper_thresh=%s" % (lower_thresh, upper_thresh)    )
+        self.pipeline['canny_edges'] = get_canny_edges(self.pipeline['blurred'], lower_thresh, upper_thresh)
+        n_downsamples = self.tabs['line_finding']['sliders'][0]['var'].get()
+        self.pipeline['canny_edges_disp'] = upsample(cv2.cvtColor(self.pipeline['canny_edges'], cv2.COLOR_GRAY2BGR),
+                                                    n_downsamples)
+        
+        
+    def _update_hough_lines(self):
+        if not hasattr(self, 'pipeline'):
+            return
+        hough_rho_res = self.tabs['line_finding']['sliders'][5]['var'].get()
+        hough_theta_res_deg = self.tabs['line_finding']['sliders'][6]['var'].get()
+        hough_threshold = self.tabs['line_finding']['sliders'][7]['var'].get()
+        hough_min_line_length = self.tabs['line_finding']['sliders'][8]['var'].get()
+        hough_max_line_gap = self.tabs['line_finding']['sliders'][9]['var'].get()
+
+        self.pipeline['hough_lines'] = get_hough_lines(self.pipeline['canny_edges'],
+                                                         hough_rho_res,
+                                                        hough_theta_res_deg,
+                                                        hough_threshold,
+                                                        hough_min_line_length,
+                                                        hough_max_line_gap)
+        
+        self.pipeline['hough_lines_disp'] = self.render_hough_lines()
+        
+    def _update_dividers(self):
+        if not hasattr(self, 'pipeline'):
+            return
+        n_lines = self.tabs['divider_initialization']['sliders'][0]['var'].get()
+        band_width_px = self.tabs['divider_initialization']['sliders'][1]['var'].get()
+        self.pipeline['divider_lines'] = unify_lines(self.pipeline, n_lines, band_width_px)
+        self.pipeline['dividers_img'] = render_dividers(self.pipeline, show_bands=False)
+        self.pipeline['dividers_img_with_bands'] = render_dividers(self.pipeline, show_bands=True)
+        
     def create_tab_content(self, tab_frame, tab_config):
         """
         Create the content of a tab based on the provided configuration.
@@ -221,16 +363,26 @@ class ExploreLinesApp(tk.Tk):
                             rowspan=LAYOUT['tab_grid']['img_rows'],
                             sticky='nsew')
         
+        # status label under control area
+        font_params = LAYOUT['fonts']['status']
+        tab_content['status_label'] = ttk.Label(tab_frame, text="Status: Ready", anchor='w',
+                                                font = tkFont.Font(**font_params['params']))
+        tab_content['status_label'].grid(row=LAYOUT['tab_grid']['img_rows'],
+                                        column=0,
+                                        rowspan=LAYOUT['tab_grid']['status_rows'],
+                                        columnspan=LAYOUT['tab_grid']['status_cols'],
+                                        sticky='nsew')
+        
         # Control area
         ctrl_frame = ttk.Frame(tab_frame, height=LAYOUT['dims']['ctrl_height_px'])
-        ctrl_frame.grid(row=LAYOUT['tab_grid']['img_rows'],
+        ctrl_frame.grid(row=LAYOUT['tab_grid']['img_rows'] + LAYOUT['tab_grid']['status_rows'],
                         column=0,
                         columnspan=LAYOUT['tab_grid']['ctrl_cols'],
                         sticky='nsew')
         
         tab_content['sliders'] = []
         for param in tab_config.get('slider_params', []):
-            tab_content['sliders'].append(self.create_slider(ctrl_frame, param))
+            tab_content['sliders'].append(self.create_slider(ctrl_frame, tab_config['name'], param))
             
         tab_content['buttons'] = []
         for button in tab_config.get('buttons', []):
@@ -242,12 +394,13 @@ class ExploreLinesApp(tk.Tk):
         
         if 'headers' in tab_config:
             for header in tab_config['headers']:
-                label = ttk.Label(ctrl_frame, text=header['label'], font=tkFont.Font(size=14, weight='bold'))
+                font_params = LAYOUT['fonts']['headers']
+                label = ttk.Label(ctrl_frame, text=header['label'], font=tkFont.Font(**font_params['params']))
                 label.grid(row=header['row_col'][0], column=header['row_col'][1], padx=5, pady=5, columnspan=header.get('colspan', 1))
         tab_content['frame'] = tab_frame
         return tab_content
 
-    def create_slider(self, parent, param):
+    def create_slider(self, parent,tab_name,  param):
         frame = ttk.Frame(parent)
         colspan = param.get('colspan', 1)
         frame.grid(row=param['row_col'][0], column=param['row_col'][1],columnspan=colspan, sticky='w', padx=5, pady=5   )
@@ -257,12 +410,21 @@ class ExploreLinesApp(tk.Tk):
         slider = {}
         slider['label'] = ttk.Label(frame, text=param['label'], font=custom_font)
         slider['label'].pack(side='top', anchor='w')
-        
-        var_type = tk.IntVar if param['type'] == 'int' else tk.DoubleVar
+        if param['type'] == 'int':
+            var_type = tk.IntVar
+            slider['format_str'] = f"{param['label']}=%d"
+            slider['val_type'] = int
+        else:
+            var_type = tk.DoubleVar
+            slider['format_str'] = f"{param['label']}=%.2f"
+            slider['val_type'] = float
+            
+        logging.info("Making slider for tab %s named %s with value type %s, default %s" % (self._cur_tab, param['name'], var_type, param['default'])    )
         var = var_type(value=param['default'])
-        slider['scale'] = ttk.Scale(frame, from_=param['range'][0], length=param['length'], command=lambda val, name=param['name']: self.slider_changed(name, val),
+        slider['scale'] = ttk.Scale(frame, from_=param['range'][0], length=param['length'], command=lambda val, name=param['name']: self.slider_changed(tab_name, name, val),
                            to=param['range'][1], orient='horizontal', variable=var)
-        slider['scale'].pack()
+        slider['scale'].pack(side='top', anchor='w')
+        
         
         
         setattr(self, param['name'], var)
@@ -271,9 +433,32 @@ class ExploreLinesApp(tk.Tk):
         return slider
     
     
-    def slider_changed(self, slider_name, value):
-        logging.info(f"Slider {slider_name} changed to {value}")
+    def slider_changed(self,tab_name, slider_name, value):
+        logging.info(f"Tab {tab_name} Slider {slider_name} changed to {value}, type {type(value)}")
         setattr(self, slider_name, value)
+        # Update slider label to show value:
+        
+        slider = [s for s in self.tabs[tab_name]['sliders'] if s['name'] == slider_name][0]
+        value = slider['val_type'](float(value))
+        slider_str = slider['format_str'] % (value,)
+        slider['label'].config(text=slider_str)
+        
+        if slider_name in ['pre_pyr_down_levels', 'pre_gaussian_blur_ksize', 'pre_gaussian_blur_sigma']:
+            self._update_preprocessing()
+            self._update_canny_edges()
+            self._update_hough_lines()
+        elif slider_name in ['canny_lower_thresh', 'canny_upper_thresh']:
+            self._update_canny_edges()
+            self._update_hough_lines()
+        elif slider_name in ['hough_rho_res', 'hough_theta_res_deg', 'hough_threshold',
+                             'hough_min_line_length', 'hough_max_line_gap']:
+            self._update_hough_lines()
+        
+        elif slider_name in ['div_n_lines', 'div_band_width_px']:
+            self._update_dividers()
+        
+        
+        
         self.update_image_display()
         
         
@@ -294,39 +479,40 @@ class ExploreLinesApp(tk.Tk):
         
     def on_toggle(self,tab_name, toggle_name, state):
         logging.info(f"Toggle {toggle_name} set to {state}")
-        # import ipdb; ipdb.set_trace()
-        
-        # deactivate other toggles in the same tab
-        for toggle in self.tabs[tab_name]['toggles']:
-            print( toggle['name'], toggle_name)
-            if toggle['name'] != toggle_name:
-                toggle['button'].state(['!selected'])
-                
-                
+                        
         toggle = [t for t in self.tabs[tab_name]['toggles'] if t['name'] == toggle_name]
         if len(toggle) == 0:
             raise ValueError(f"Unknown toggle name: {toggle_name}")
         toggle = toggle[0]
+        toggle['var'].set(state)    
     
         if toggle_name == 'show_preprocessing' and state:
             self.mode = ViewMode.PREPROCESSING
-            
             toggle['button'].state(['selected'])
+            edge_toggle = [t for t in self.tabs[tab_name]['toggles'] if t['name'] == 'show_canny_edges'][0]
+            edge_toggle['button'].state(['!selected']) 
+            edge_toggle['var'].set(False)
         elif toggle_name == 'show_canny_edges' and state:
             self.mode = ViewMode.CANNY_EDGES
             toggle['button'].state(['selected'])
-        elif toggle_name == 'show_hough_lines' and state:
-            self.mode = ViewMode.HOUGH_LINES
-            toggle['button'].state(['selected'])
-
+            pre_toggle = [t for t in self.tabs[tab_name]['toggles'] if t['name'] == 'show_preprocessing'][0]
+            pre_toggle['button'].state(['!selected'])
+            pre_toggle['var'].set(False)
             
-        # elif toggle_name == 'show_canny_edges' and state:
-        #     self.mode = ViewMode.CANNY_EDGES
-        # elif toggle_name == 'show_hough_lines' and state:
-        #     self.mode = ViewMode.HOUGH_LINES
-        # else:
-        #     raise ValueError(f"Unknown toggle action: {toggle_name}")
-        # self.update_image_display()
+        elif toggle_name == 'show_hough_lines':
+            self.showing_lines = state
+            logging.info(f"Setting showing_lines to {self.showing_lines}")
+            
+            if state:
+                toggle['button'].state(['selected'])
+            else:
+                toggle['button'].state(['!selected'])
+                
+        if self.showing_lines:
+            self.pipeline['hough_lines_disp'] = self.render_hough_lines()
+                
+            
+        self.update_image_display()
         
     def create_button(self, parent, button_info):
         button={'button': ttk.Button(parent, text=button_info['label'], command=lambda: self.on_button_click(button_info['name']),
@@ -340,18 +526,7 @@ class ExploreLinesApp(tk.Tk):
     def on_button_click(self, button_name):
         if button_name == 'save_divider_init':
             self.save_divider_initialization()
-        elif button_name == 'apply':
-            self.apply_hough_transform()
-        elif button_name == 'show_preprocessing':
-            self.mode = ViewMode.PREPROCESSING
-            self.update_image_display()
-        elif button_name == 'show_canny_edges':
-            self.mode = ViewMode.CANNY_EDGES
-            self.update_image_display()
-        elif button_name == 'show_hough_lines':
-            self.mode = ViewMode.HOUGH_LINES
-            self.update_image_display()
-            
+
         else:
             raise ValueError(f"Unknown button action: {button_name}")
             
@@ -359,13 +534,36 @@ class ExploreLinesApp(tk.Tk):
         print("Saving divider initialization...")
         # Implement saving logic here
         
-    def apply_hough_transform(self):
-        print("Applying Hough Transform...")
-        # Implement Hough transform logic here
         
     def update_image_display(self):
         logging.info("Updating image display")
-        img_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
+        if not hasattr(self, 'pipeline'):
+            logging.warning("Pipeline not initialized yet, skipping image update")
+            return
+        
+        if self._cur_tab == 'line_finding':
+            if self.showing_lines:
+                image = self.pipeline['hough_lines_disp']
+            else:
+                if self.mode == ViewMode.PREPROCESSING:
+                    image = self.pipeline['blurred_disp']
+                elif self.mode == ViewMode.CANNY_EDGES:
+                    image = self.pipeline['canny_edges_disp']
+                else:
+                    raise ValueError(f"Unknown view mode: {self.mode}")
+        elif self._cur_tab == 'divider_initialization':
+            show_bands_toggle = [t for t in self.tabs['divider_initialization']['toggles'] if t['name'] == 'show_bands'][0]
+            show_bands = show_bands_toggle['var'].get()
+            if show_bands:
+                image = self.pipeline['dividers_img_with_bands']
+            else:
+                image = self.pipeline['dividers_img']
+        
+        
+        
+        
+        
+        img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         img_pil = Image.fromarray(img_rgb)
         # img_pil = img_pil.resize(LAYOUT['dims']['tab_image_size_wh'])
         img_tk = ImageTk.PhotoImage(img_pil)

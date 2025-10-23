@@ -104,9 +104,9 @@ class EdgeFinder(object):
         print("Made pyramid with %i levels" % len(self.img_pyr))
         print("Sizes: ", [lvl.shape for lvl in self.img_pyr])
         
-        
+if __name__ == "__main__":
 
-image = trim_image(cv2.imread(sys.argv[1])[:,:,::-1],2)
-test = EdgeFinder(image, n_levels=1)
-test.plot()
-plt.show()
+    image = trim_image(cv2.imread(sys.argv[1])[:,:,::-1],2)
+    test = EdgeFinder(image, n_levels=1)
+    test.plot()
+    plt.show()

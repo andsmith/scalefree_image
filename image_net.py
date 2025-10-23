@@ -246,7 +246,7 @@ class NNetImage(object):
                              'bands': []},
                          'output_image': None}
         self._lims_set = False
-        
+
         if state_file is not None:
             # These params can't change (except for updating weights in self._model), so they override the args.
             # (so they can be None in the args)
@@ -274,7 +274,7 @@ class NNetImage(object):
             network_weights = None
 
         # Might have a different image now, finally set these:
-        self.n_input = n_train if n_train > 0  else image.shape[0] * image.shape[1]
+        self.n_input = n_train if n_train > 0  else self.image.shape[0] * self.image.shape[1]
         self.batch_size = batch_size
         self.minibatches_per_epoch = int(np.ceil(self.n_input / self.batch_size))
         self.image_size_wh = (self.image.shape[1], self.image.shape[0])  # (w,h)

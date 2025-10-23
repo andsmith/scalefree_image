@@ -107,11 +107,18 @@ class UIDisplay(object):
         else:
             self._learning_rate_decay = None
             
-        self._image, self._file_prefix = self._set_image(image_file, synth_image_name)
+        # If no image is given, there might be one in the state file
+
+        if image_file is not None:
+            self._image, self._file_prefix = self._set_image(image_file, synth_image_name)
+        else:
+            self._image = None
 
         self._sim = NNetImage(n_div=self.n_div, n_hidden=n_hidden, n_structure=n_structure, learning_rate_initial=self._learn_rate,
                         batch_size=self._batch_size, state_file=state_file, image=self._image, line_params=self._line_params,
                         n_train=self._n_train, center_weight_params=self._center_weight_params, dry_run=dry_run,**kwargs)
+        if image_file is None:
+            self._image, self._file_prefix = self._set_image(img_filename=None,synth_name=None, image_raw = self._sim.image)
 
         # Check for metadata file
         if state_file is not None:
@@ -169,20 +176,21 @@ class UIDisplay(object):
 
         self._just_image = just_image
         
-    def _set_image(self, img_filename, synth_name, image_size_wh = (2*64, 2*(32+16))):
+    def _set_image(self, img_filename, synth_name, image_raw=None):
         """
         disambiguate, load  / generate image
         :param img_filename: path to image file
         :param synth_name: name of the synthetic image type to generate, or None
-        :param image_size_wh: size of synthetic image to generate (width, height)
+        :param image_raw: raw image data if already loaded
         """
         if synth_name is not None:
+            image_size_wh = (2*64, 2*(32+16))
             image_maker = TestImageMaker(image_size_wh)
             image_raw = image_maker.make_image(synth_name)
             file_prefix = "SYNTH_%s" % (synth_name,)
             logging.info("Generated synthetic image type %s with shape %s, using prefix %s" %
                          (synth_name, image_raw.shape, file_prefix))
-        else:
+        elif img_filename is not None:
             
             if not os.path.exists(img_filename):
                 raise Exception("Image file doesn't exist:  %s" % (img_filename,))
@@ -192,6 +200,9 @@ class UIDisplay(object):
             file_prefix = os.path.basename(os.path.splitext(os.path.basename(img_filename))[0])
             logging.info("Loaded image %s with shape %s, using save_prefix %s" %
                         (img_filename, image_raw.shape, file_prefix))
+        else:
+            file_prefix = "stateFileImg"
+        
 
         return image_raw, file_prefix
 

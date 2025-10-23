@@ -89,7 +89,7 @@ LAYOUT = {'dims': {'min_size_wh': (875, 480),
                    'hough_x_split_rel': 0.7,},
           'fonts': {'tabs': {'name': 'TNotebook.Tab','params': {'family': 'Arial', 'size': 14, 'weight': 'bold'}},
                     'sliders': {'name': 'TScale','params': {'family': 'Arial', 'size': 12}},
-                    'buttons': {'name': 'TButton','params': {'family': 'Arial', 'size': 14, 'weight': 'bold'}},
+                    'buttons': {'name': 'TButton','params': {'family': 'Arial', 'size': 12, 'weight': 'bold'}},
                     'checkButtons': {'name': 'TCheckbutton','params': {'family': 'Arial', 'size': 14},},
                     'status': {'name': 'TLabel','params': {'family': 'Arial', 'size': 12}},
                     'headers': {'name': 'TLabel','params': {'family': 'Arial', 'size': 16, 'weight': 'bold'}},
@@ -110,13 +110,14 @@ LAYOUT = {'dims': {'min_size_wh': (875, 480),
                       {'row_col': (1, 1), 'name': 'canny_lower_thresh', 'label': 'lower-threshold', 'type': 'int', 'default': 50, 'range': (0, 1000), 'length': 200},
                       {'row_col': (2, 1), 'name': 'canny_upper_thresh', 'label': 'upper-threshold', 'type': 'int', 'default': 150, 'range': (0, 1000), 'length': 200},
                       
-                      {'row_col': (1, 2), 'name': 'hough_rho_res', 'label': 'rho-resolution', 'type': 'int', 'default': 1, 'range': (1, 15), 'length': 200},
-                      {'row_col': (2, 2), 'name': 'hough_theta_res_deg', 'label': 'theta-resolution (degrees)', 'type': 'float', 'default': 1.0, 'range': (0.5, 15.0), 'length': 200},
+                      {'row_col': (1, 2), 'name': 'hough_rho_res', 'label': 'rho-res', 'type': 'int', 'default': 1, 'range': (1, 15), 'length': 200},
+                      {'row_col': (2, 2), 'name': 'hough_theta_res_deg', 'label': 'theta-res (deg)', 'type': 'float', 'default': 1.0, 'range': (0.5, 15.0), 'length': 200},
                       {'row_col': (3, 2), 'name': 'hough_threshold', 'label': 'threshold', 'type': 'int', 'default': 50,  'range': (1, 2000), 'length': 200},
                       {'row_col': (1, 3), 'name': 'hough_min_line_length', 'label': 'min-line-length', 'type': 'int',  'default': 25,  'range': (5, 50), 'length': 200},
                       {'row_col': (2, 3), 'name': 'hough_max_line_gap',    'label': 'max-line-gap',    'type': 'int',  'default': 5,  'range': (0, 30), 'length': 200},
                   ],
-                  
+                  'buttons': [{'row_col':(3,3), 'name': 'load_params', 'label': 'load params'},
+                              {'row_col':(4,3), 'name': 'save_params', 'label': 'save params'},],
                   'toggles': [{'row_col':(3,1), 'name': 'show_preprocessing', 'label': 'show image'},
                               {'row_col':(4,1), 'name': 'show_canny_edges', 'label': 'show edges'},
                               {'row_col':(4,2), 'name': 'show_hough_lines', 'label': 'show lines'},],
@@ -127,10 +128,12 @@ LAYOUT = {'dims': {'min_size_wh': (875, 480),
                   },
                 'divider_initialization': {
                     'slider_params': [
-                        {'row_col': (0, 0), 'colspan': 2,'name': 'div_n_lines', 'label': 'Ds1- n lines', 'type': 'int', 'default': 64, 'range': (1, 2048), 'length': 700},
-                        {'row_col': (1, 0), 'name': 'div_band_width_px', 'label': 'Ds2- band_width_px', 'type': 'int', 'default': 10, 'range': (1, 50), 'length': 200  },],
-                    'buttons': [{'row_col':(1,1), 'name': 'save_divider_init', 'label': 'save'}]       ,
-                    'toggles': [{'row_col':(2,0), 'name': 'show_bands', 'label': 'show bands'}],
+                        {'row_col': (0, 0), 'colspan': 3,'name': 'div_n_lines', 'label': 'N Line Dividers', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 700},
+                        {'row_col': (1, 0), 'colspan': 3,'name': 'n_structure_units', 'label': 'N Structure units', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 700},
+                        {'row_col': (2, 0), 'colspan': 3,'name': 'n_color_units', 'label': 'N Color units', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 700},
+                        {'row_col': (0, 3), 'name': 'div_band_width_px', 'label': 'Band width (px)', 'type': 'int', 'default': 3, 'range': (1, 10), 'length': 200  },],
+                    'buttons': [{'row_col':(2,3), 'name': 'save_divider_init', 'label': 'save'}]       ,
+                    'toggles': [{'row_col':(1,3), 'name': 'show_bands', 'label': 'show bands'}],
                     }
           }
 }
@@ -143,6 +146,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 import logging
+import os
+import json
+from tkinter import filedialog
+
+from image_net import NNetImage
+
 import sys
 from enum import IntEnum
 from find_lines import trim_image
@@ -189,13 +198,6 @@ def get_hough_lines(edges, rho_res, theta_res_deg, threshold, min_line_length, m
 def unify_lines(pipeline, n_lines, band_width_px):
     return None
 
-def render_dividers(pipeline, show_bands=False):
-    img = np.zeros_like(pipeline['downsampled'])
-    text = "Rendered dividers, bands " + ("shown" if show_bands else "hidden")
-    cv2.putText(img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-    return img
-
-
 
 class ViewMode(IntEnum):
     # For tab 1, line finding.
@@ -235,10 +237,10 @@ class ExploreLinesApp(tk.Tk):
 
         # Configure the 'TNotebook.Tab' style to use the custom font
         style.configure("TNotebook.Tab", font=custom_font)
-
-        
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill='both', expand=True)
+        # Configure callback for tab change:
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
         
         self.tabs = {}
         
@@ -266,6 +268,53 @@ class ExploreLinesApp(tk.Tk):
     #     self.update_image_display()
         # logging.info("Window resized to: %dx%d" % (event.width, event.height))
         
+    def on_tab_change(self, event):
+        selected_tab = event.widget.tab(event.widget.index("current"))["text"].lower().replace(' ', '_')
+        logging.info(f"Switched to tab: {selected_tab}")
+        self._cur_tab = selected_tab
+        self.update_image_display()
+        
+    def save_params(self, tab_name):
+        """
+        Open save-file dialog to save current params to a json file.
+        """
+        tab = self.tabs[tab_name]
+        params = {}
+        for slider in tab['sliders']:
+            params[slider['name']] = getattr(self, slider['name'])
+        
+        file_path = filedialog.asksaveasfilename(defaultextension=".json",
+                                                 filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                                                 title="Save Parameters As")
+        if file_path:
+            with open(file_path, 'w') as f:
+                json.dump(params, f, indent=4)
+            logging.info(f"Saved parameters to {file_path}")
+        
+    def load_params(self, tab_name):
+        """
+        Open open-file dialog to load params from a json file.
+        """
+
+        file_path = filedialog.askopenfilename(defaultextension=".json",
+                                               filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                                               title="Load Parameters From")
+        if file_path and os.path.isfile(file_path):
+            with open(file_path, 'r') as f:
+                params = json.load(f)
+            tab = self.tabs[tab_name]
+            for slider in tab['sliders']:
+                if slider['name'] in params:
+                    value = params[slider['name']]
+                    slider = [s for s in self.tabs[tab_name]['sliders'] if s['name'] == slider['name']][0]
+                    slider['scale'].set(value)  # update the scale position
+            logging.info(f"Loaded parameters from {file_path}")
+            # Update the image display after loading new params
+            self._update_preprocessing()
+            self._update_canny_edges()
+            self._update_hough_lines()
+            self._update_dividers()
+            self.update_image_display()
 
     def render_hough_lines(self):
         render_over_orig = self.tabs['line_finding']['toggles'][0]['var'].get()
@@ -294,7 +343,10 @@ class ExploreLinesApp(tk.Tk):
         self.pipeline['downsampled_disp'] = upsample(self.pipeline['downsampled'], n_downsamples)
         self.pipeline['blurred'] = blur(self.pipeline['downsampled'], kernel_size, kernel_sigma)
         self.pipeline['blurred_disp'] = upsample(self.pipeline['blurred'], n_downsamples)
+        self._set_status()
         
+        
+    def _set_status(self):
         status_str = "Image size:  %d x %d (after downsampling:  %d x %d) - Num Hough lines: %d" % (self.pipeline['original'].shape[1], self.pipeline['original'].shape[0],
                                                                            self.pipeline['downsampled'].shape[1], self.pipeline['downsampled'].shape[0],
                                                                            0 if 'hough_lines' not in self.pipeline or self.pipeline['hough_lines'] is None else len(self.pipeline['hough_lines']))    
@@ -337,6 +389,7 @@ class ExploreLinesApp(tk.Tk):
                                                         hough_max_line_gap)
         
         self.pipeline['hough_lines_disp'] = self.render_hough_lines()
+        self._set_status()
         
     def _update_dividers(self):
         if not hasattr(self, 'pipeline'):
@@ -344,8 +397,23 @@ class ExploreLinesApp(tk.Tk):
         n_lines = self.tabs['divider_initialization']['sliders'][0]['var'].get()
         band_width_px = self.tabs['divider_initialization']['sliders'][1]['var'].get()
         self.pipeline['divider_lines'] = unify_lines(self.pipeline, n_lines, band_width_px)
-        self.pipeline['dividers_img'] = render_dividers(self.pipeline, show_bands=False)
-        self.pipeline['dividers_img_with_bands'] = render_dividers(self.pipeline, show_bands=True)
+        self.pipeline['dividers_img'] = self.render_dividers(show_bands=False)
+        self.pipeline['dividers_img_with_bands'] = self.render_dividers(show_bands=True)
+        
+        
+    def render_dividers(self, show_bands=False):
+        n_div = self.tabs['divider_initialization']['sliders'][0]['var'].get()
+        n_struct = self.tabs['divider_initialization']['sliders'][1]['var'].get()
+        n_color = self.tabs['divider_initialization']['sliders'][2]['var'].get()
+        logging.info(f"Rendering dividers with n_div={n_div}, n_struct={n_struct}, n_color={n_color}, show_bands={show_bands}")
+        img = np.zeros_like(self.pipeline['original'])
+        text = "Rendered %i dividers, bands " % (n_div,) + ("shown" if show_bands else "hidden")
+        cv2.putText(img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        text = "Will create network with structure 2-%i-%i-%i-3" % (n_div, n_struct, n_color)
+        cv2.putText(img, text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        return img
+
+
         
     def create_tab_content(self, tab_frame, tab_config):
         """
@@ -456,6 +524,7 @@ class ExploreLinesApp(tk.Tk):
         
         elif slider_name in ['div_n_lines', 'div_band_width_px']:
             self._update_dividers()
+            
         
         
         
@@ -526,17 +595,39 @@ class ExploreLinesApp(tk.Tk):
     def on_button_click(self, button_name):
         if button_name == 'save_divider_init':
             self.save_divider_initialization()
+        elif button_name == 'save_params':
+            self.save_params(self._cur_tab)
+        elif button_name == 'load_params':
+            self.load_params(self._cur_tab)
 
         else:
             raise ValueError(f"Unknown button action: {button_name}")
             
     def save_divider_initialization(self):
-        print("Saving divider initialization...")
-        # Implement saving logic here
         
+        n_lines = self.tabs['divider_initialization']['sliders'][0]['var'].get()
+        n_struct = self.tabs['divider_initialization']['sliders'][1]['var'].get()
+        n_color = self.tabs['divider_initialization']['sliders'][2]['var'].get()
+        logging.info(f"Saving diviers with n_lines={n_lines}, n_struct={n_struct}, n_color={n_color}")
+        
+        n_div = {'linear': n_lines,
+                 'circular': 0,
+                 'normal': 0}
+        
+        image = self.pipeline['original']
+        
+        net_image = NNetImage(image=image[:,:,::-1], n_div=n_div, n_structure=n_struct, n_hidden=n_color)
+        save_path = filedialog.asksaveasfilename(defaultextension=".pkl",
+                                                 filetypes=[("NNetImage (pickle) files", "*.pkl"), ("All files", "*.*")],
+                                                 title="Save Divider Initialization As")
+        if save_path:
+            net_image.save_state(save_path)
+            logging.info(f"Saved divider initialization to {save_path}")
+
+        self.update_image_display()
         
     def update_image_display(self):
-        logging.info("Updating image display")
+        logging.info("Updating image display for tab %s" % (self._cur_tab,)    )
         if not hasattr(self, 'pipeline'):
             logging.warning("Pipeline not initialized yet, skipping image update")
             return
@@ -551,7 +642,10 @@ class ExploreLinesApp(tk.Tk):
                     image = self.pipeline['canny_edges_disp']
                 else:
                     raise ValueError(f"Unknown view mode: {self.mode}")
+                
+                
         elif self._cur_tab == 'divider_initialization':
+            
             show_bands_toggle = [t for t in self.tabs['divider_initialization']['toggles'] if t['name'] == 'show_bands'][0]
             show_bands = show_bands_toggle['var'].get()
             if show_bands:

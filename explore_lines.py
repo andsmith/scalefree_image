@@ -81,6 +81,31 @@ Tab 1: Line finding has 3 views
     +-----------------------------------+
 
 """
+    
+from cProfile import label
+import tkinter as tk
+from tkinter import ttk
+import tkinter.font as tkFont
+
+import cv2
+import numpy as np
+from PIL import Image, ImageTk
+import logging
+import os
+import json
+from tkinter import filedialog
+import pickle
+from image_net import NNetImage
+
+import sys
+from enum import IntEnum
+from find_lines import trim_image
+
+class LineMode(IntEnum):
+    HOUGH_LINES = 1
+    LSD_LINES = 2
+    
+    
 LAYOUT = {'dims': {'min_size_wh': (875, 480),
                    #'tab_image_size_wh': (800, 600),
                    'ctrl_height_px': 275,
@@ -110,52 +135,46 @@ LAYOUT = {'dims': {'min_size_wh': (875, 480),
                       {'row_col': (1, 1), 'name': 'canny_lower_thresh', 'label': 'lower-threshold', 'type': 'int', 'default': 50, 'range': (0, 1000), 'length': 200},
                       {'row_col': (2, 1), 'name': 'canny_upper_thresh', 'label': 'upper-threshold', 'type': 'int', 'default': 150, 'range': (0, 1000), 'length': 200},
                       
-                      {'row_col': (1, 2), 'name': 'hough_rho_res', 'label': 'rho-res', 'type': 'int', 'default': 1, 'range': (1, 15), 'length': 200},
-                      {'row_col': (2, 2), 'name': 'hough_theta_res_deg', 'label': 'theta-res (deg)', 'type': 'float', 'default': 1.0, 'range': (0.5, 15.0), 'length': 200},
-                      {'row_col': (3, 2), 'name': 'hough_threshold', 'label': 'threshold', 'type': 'int', 'default': 50,  'range': (1, 2000), 'length': 200},
-                      {'row_col': (1, 3), 'name': 'hough_min_line_length', 'label': 'min-line-length', 'type': 'int',  'default': 25,  'range': (5, 50), 'length': 200},
-                      {'row_col': (2, 3), 'name': 'hough_max_line_gap',    'label': 'max-line-gap',    'type': 'int',  'default': 5,  'range': (0, 30), 'length': 200},
+                      {'row_col': (1, 2), 'name': 'hough_rho_res', 'label': 'rho-res', 'type': 'int', 'default': 1, 'range': (1, 15), 'length': 200, 'tag': LineMode.HOUGH_LINES},
+                      {'row_col': (2, 2), 'name': 'hough_theta_res_deg', 'label': 'theta-res (deg)', 'type': 'float', 'default': 1.0, 'range': (0.5, 15.0), 'length': 200, 'tag': LineMode.HOUGH_LINES},
+                      {'row_col': (3, 2), 'name': 'hough_threshold', 'label': 'threshold', 'type': 'int', 'default': 50,  'range': (1, 2000), 'length': 200, 'tag': LineMode.HOUGH_LINES},
+                      {'row_col': (1, 3), 'name': 'hough_min_line_length', 'label': 'min-line-length', 'type': 'int',  'default': 10,  'range': (3, 50), 'length': 200, 'tag': LineMode.HOUGH_LINES},
+                      {'row_col': (2, 3), 'name': 'hough_max_line_gap',    'label': 'max-line-gap',    'type': 'int',  'default': 5,  'range': (0, 30), 'length': 200, 'tag': LineMode.HOUGH_LINES},
+                    #   {'row_col': (1, 2), 'name': 'lsd_scale', 'label': 'image scale', 'type': 'float', 'default': .8, 'range': (0.0, 1.0), 'length': 200, 'tag': LineMode.LSD_LINES},
+                    #   {'row_col': (1, 2), 'name': 'lsd_sigma_scale', 'label': 'sigma scale', 'type': 'float', 'default': 0.6, 'range': (0.0, 10.0), 'length': 200, 'tag': LineMode.LSD_LINES},
+                    #   {'row_col': (1, 2), 'name': 'lsd_quant', 'label': 'quantization', 'type': 'float', 'default': 2.0, 'range': (0.0, 10.0), 'length': 200, 'tag': LineMode.LSD_LINES},
+                    #   {'row_col': (1, 2), 'name': 'lsd_ang_th', 'label': 'angle thresh.', 'type': 'float', 'default': 22.5, 'range': (0.0, 180.0), 'length': 200, 'tag': LineMode.LSD_LINES},
+                    #   {'row_col': (1, 2), 'name': 'lsd_log_eps', 'label': 'log epsilon', 'type': 'float', 'default': 0.0, 'range': (-10.0, 10.0), 'length': 200, 'tag': LineMode.LSD_LINES},
+                    #   {'row_col': (1, 2), 'name': 'lsd_n_bins', 'label': 'N bins', 'type': 'int', 'default': 1024, 'range': (10, 2048), 'length': 200, 'tag': LineMode.LSD_LINES},
+                      
                   ],
                   'buttons': [{'row_col':(3,3), 'name': 'load_params', 'label': 'load params'},
                               {'row_col':(4,3), 'name': 'save_params', 'label': 'save params'},],
                   'toggles': [{'row_col':(3,1), 'name': 'show_preprocessing', 'label': 'show image'},
                               {'row_col':(4,1), 'name': 'show_canny_edges', 'label': 'show edges'},
-                              {'row_col':(4,2), 'name': 'show_hough_lines', 'label': 'show lines'},],
-                  
+                              {'row_col':(4,2), 'name': 'show_lines', 'label': 'show lines'}],                  
                   'headers': [{'row_col': (0,0), 'label': 'Preprocessing','colspan': 1},
                               {'row_col': (0,1), 'label': 'Canny Edges','colspan': 1},
                               {'row_col': (0,2), 'label': 'Hough Line Detection','colspan': 2},]
                   },
                 'divider_initialization': {
                     'slider_params': [
-                        {'row_col': (0, 0), 'colspan': 3,'name': 'div_n_lines', 'label': 'N Line Dividers', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 700},
-                        {'row_col': (1, 0), 'colspan': 3,'name': 'n_structure_units', 'label': 'N Structure units', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 700},
-                        {'row_col': (2, 0), 'colspan': 3,'name': 'n_color_units', 'label': 'N Color units', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 700},
-                        {'row_col': (0, 3), 'name': 'div_band_width_px', 'label': 'Band width (px)', 'type': 'int', 'default': 3, 'range': (1, 10), 'length': 200  },],
-                    'buttons': [{'row_col':(2,3), 'name': 'save_divider_init', 'label': 'save'}]       ,
-                    'toggles': [{'row_col':(1,3), 'name': 'show_bands', 'label': 'show bands'}],
+                        {'row_col': (1, 0), 'colspan': 3,'name': 'div_n_lines', 'label': 'N Line Dividers', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 200},
+                        {'row_col': (2, 0), 'colspan': 3,'name': 'n_structure_units', 'label': 'N Structure units', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 200},
+                        {'row_col': (3, 0), 'colspan': 3,'name': 'n_color_units', 'label': 'N Color units', 'type': 'int', 'default': 64, 'range': (1, 512), 'length': 200},
+                        
+                        {'row_col': (1, 1), 'colspan': 3,'name': 'ang_size', 'label': 'Max angle diff', 'type': 'float', 'default': .30, 'range': (.01, 3.0), 'length': 200},
+                        {'row_col': (2, 1), 'colspan': 3,'name': 'dist_size', 'label': 'Max distance', 'type': 'float', 'default': .1, 'range': (.001, .03), 'length': 200},
+                        {'row_col': (3, 1), 'colspan': 3,'name': 'min_line_len', 'label': 'Min line length', 'type': 'float', 'default': .00, 'range': (0.0, .5), 'length': 200},
+                        ],
+                  'headers': [{'row_col': (0,0), 'label': 'Network Architecture','colspan': 1},
+                              {'row_col': (0,1), 'label': 'Edge selection','colspan': 1},],
+                  
+                    'buttons': [{'row_col':(1,4), 'name': 'save_divider_init', 'label': 'save'},
+                                {'row_col':(2,4), 'name': 'compute_dividers', 'label': 'compute'},],
                     }
           }
 }
-from cProfile import label
-import tkinter as tk
-from tkinter import ttk
-import tkinter.font as tkFont
-
-import cv2
-import numpy as np
-from PIL import Image, ImageTk
-import logging
-import os
-import json
-from tkinter import filedialog
-
-from image_net import NNetImage
-
-import sys
-from enum import IntEnum
-from find_lines import trim_image
-
 
 
 
@@ -171,12 +190,10 @@ def downsample(image, levels):
     return image
 def upsample(image, levels):    
     block_template = np.ones((2,2),np.uint8)
-    print(image.shape, image.dtype)
     for _ in range(levels):
         image = cv2.merge((np.kron(image[:,:,0], block_template),
                           np.kron(image[:,:,1], block_template),
                           np.kron(image[:,:,2], block_template)))
-    print(image.shape, image.dtype)
     return image.astype(np.uint8)
 def blur(image, ksize, sigma):
     if sigma==0.0:
@@ -189,14 +206,14 @@ def blur(image, ksize, sigma):
 def get_canny_edges(image, lower_thresh, upper_thresh):
     return cv2.Canny(image, lower_thresh, upper_thresh)
 
-def get_hough_lines(edges, rho_res, theta_res_deg, threshold, min_line_length, max_line_gap):
+def get_hough_lines(edges, rho_res, theta_res_deg, threshold, min_line_length,   max_line_gap):
     theta_res = np.deg2rad(theta_res_deg)
+    logging.info("Finding Hough lines in image with shape %s" % (edges.shape,))
     lines = cv2.HoughLinesP(edges, rho_res, theta_res, threshold,
                             minLineLength=min_line_length,
                             maxLineGap=max_line_gap)
     return lines
-def unify_lines(pipeline, n_lines, band_width_px):
-    return None
+
 
 
 class ViewMode(IntEnum):
@@ -211,7 +228,19 @@ class ExploreLinesApp(tk.Tk):
         self.mode = ViewMode.PREPROCESSING
         self.showing_lines = False
         self._cur_tab = 'line_finding'
+        self._line_mode = LineMode.LSD_LINES
         
+        self._mouse_pos = None  # relative logical pos in line space, and pixel pos in image display
+        self._mouse_scale = None
+        
+        
+        self._mouseover_lines = []  
+        
+        
+        
+        
+        self._lsd = lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_ADV)
+
         self.image = cv2.imread(image_path)
         logging.info(f"Loaded image from {image_path} with shape {self.image.shape}")
         
@@ -249,6 +278,8 @@ class ExploreLinesApp(tk.Tk):
             self.notebook.add(tab_frame, text=tab_name.replace('_', ' ').title())
             tab_config['name'] = tab_name
             self.tabs[tab_name] = self.create_tab_content(tab_frame,  tab_config)
+            
+        # self.on_toggle('line_finding', 'hough_lines', True)
     
         self.on_toggle('line_finding', 'show_preprocessing', True)
         
@@ -267,6 +298,7 @@ class ExploreLinesApp(tk.Tk):
     # def on_resize(self, event):
     #     self.update_image_display()
         # logging.info("Window resized to: %dx%d" % (event.width, event.height))
+        
         
     def on_tab_change(self, event):
         selected_tab = event.widget.tab(event.widget.index("current"))["text"].lower().replace(' ', '_')
@@ -313,17 +345,17 @@ class ExploreLinesApp(tk.Tk):
             self._update_preprocessing()
             self._update_canny_edges()
             self._update_hough_lines()
-            self._update_dividers()
             self.update_image_display()
 
     def render_hough_lines(self):
         render_over_orig = self.tabs['line_finding']['toggles'][0]['var'].get()
-        print("RENDERING OVER ORIGINAL IMAGE:   ", render_over_orig)
-        
+        valid = self.pipeline['hough_lines_valid']if 'shough_lines_valid' in self.pipeline else [True]* len(self.pipeline['hough_lines'])
         img = self.pipeline['original'].copy() if render_over_orig else self.pipeline['canny_edges_disp'].copy()
         if self.pipeline['hough_lines'] is not None:
             n_downsamples = self.pipeline['n_downsamples']
-            for line in self.pipeline['hough_lines']:
+            for line,valid in zip(self.pipeline['hough_lines'], valid):
+                if not valid:
+                    continue
                 x1, y1, x2, y2 = line[0].astype(float) * (2**n_downsamples)
                 cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2, cv2.LINE_AA)
         logging.info("Rendered %i lines on image" % (0 if self.pipeline['hough_lines'] is None else len(self.pipeline['hough_lines'])))
@@ -353,11 +385,22 @@ class ExploreLinesApp(tk.Tk):
         self.tabs['line_finding']['status_label'].config(text=status_str)
                 
     def _init_image_pipeline(self):     
+        self.aspect = self.image.shape[1] / self.image.shape[0]
+        if self.aspect > 1.0:
+            self.x_scale = 1.0
+            self.y_scale = 1.0 / self.aspect
+        else:
+            self.x_scale = self.aspect
+            self.y_scale = 1.0
+            
+            
         self.pipeline = {}
+        # import ipdb; ipdb.set_trace()
         self._update_preprocessing()
         self._update_canny_edges()
         self._update_hough_lines()
         self._update_dividers()
+        self._update_divider_images()
         
         
     def _update_canny_edges(self):
@@ -387,30 +430,183 @@ class ExploreLinesApp(tk.Tk):
                                                         hough_threshold,
                                                         hough_min_line_length,
                                                         hough_max_line_gap)
+        logging.info("Detected %i Hough lines." % (0 if self.pipeline['hough_lines'] is None else len(self.pipeline['hough_lines'])))
+        
+        self.pipeline['hough_line_params'] = self._calc_line_params()
         
         self.pipeline['hough_lines_disp'] = self.render_hough_lines()
         self._set_status()
+    
+    def pixel_to_logical(self, size_wh, x, y):
+        w, h = size_wh
+        lx = (x / w - 0.5) * self.x_scale
+        ly = (y / h - 0.5) * self.y_scale
+        return lx, ly
+    
+    def logical_to_pixel(self, size_wh, lx, ly):
+        w, h = size_wh
+        x = int((lx / self.x_scale + 0.5) * w)
+        y = int((ly / self.y_scale + 0.5) * h)
+        return x, y
         
+    def _calc_line_params(self):
+        """
+        Convert line coordinates to logical.
+        For every line (x0, y0) - (x1, y1) compute (angle, dist) from center of image and (legnth).
+        """
+        if 'hough_lines' not in self.pipeline:
+            return None
+
+        size_wh = self.pipeline['canny_edges'].shape[:2][::-1]
+        cx, cy = np.zeros(2)
+
+        line_params = []
+
+        for line in self.pipeline['hough_lines']:
+            x0, y0, x1, y1 = line[0]
+            x0, y0 = self.pixel_to_logical(size_wh, x0, y0)
+            x1, y1 = self.pixel_to_logical(size_wh, x1, y1)
+            angle = np.arctan2(y1 - y0, x1 - x0)
+            # dist = np.sqrt((cx - (x0 + x1) // 2) ** 2 + (cy - (y0 + y1) // 2) ** 2)
+            
+            num = (x0*y1 - x1*y0)
+            denom = np.sqrt((y1 - y0)**2 + (x1 - x0)**2)
+            dist = num / denom  # signed distance from origin to line            
+            length = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+            line_params.append((angle, dist, length))
+        line_params = np.array(line_params)
+        logging.info(f"Calculated logical parameters for {len(line_params)} lines.")
+        return line_params
+
     def _update_dividers(self):
+        
         if not hasattr(self, 'pipeline'):
             return
-        n_lines = self.tabs['divider_initialization']['sliders'][0]['var'].get()
-        band_width_px = self.tabs['divider_initialization']['sliders'][1]['var'].get()
-        self.pipeline['divider_lines'] = unify_lines(self.pipeline, n_lines, band_width_px)
-        self.pipeline['dividers_img'] = self.render_dividers(show_bands=False)
-        self.pipeline['dividers_img_with_bands'] = self.render_dividers(show_bands=True)
+        # filter lines by length
+        min_line_len = self.tabs['divider_initialization']['sliders'][5]['var'].get()
+        lengths= self.pipeline['hough_line_params'][:,2]
+        
+        max_ang = self.tabs['divider_initialization']['sliders'][3]['var'].get()
+        max_dist = self.tabs['divider_initialization']['sliders'][4]['var'].get()
+
+        
+        valid_lengths=[lengths[l_i] >= min_line_len for l_i, line in enumerate(self.pipeline['hough_lines']) ]
+        self.pipeline['hough_lines_valid'] = valid_lengths
+        logging.info(f"Filtered Hough lines from {len(lengths)} to {np.sum(valid_lengths)} using min_line_len={min_line_len}")
+        image = np.zeros_like(self.pipeline['original'])
+        w,h = image.shape[1], image.shape[0]
+
+        # filter moused-over lines, if any
+        if self._mouse_pos is not None:
+            dists = self.pipeline['hough_line_params'][:,1]
+            angles = np.rad2deg(self.pipeline['hough_line_params'][:,0])
+            angle_span = np.min(angles), np.max(angles)
+            dist_span = np.min(dists), np.max(dists)
+            # angle_x = (angles - angle_span[0]) / (angle_span[1] - angle_span[0]) * w
+            # dist_y = (dists - dist_span[0]) / (dist_span[1] - dist_span[0]) * h
+
+            # angles_deg = np.rad2deg(angles)
+            mouse_angle = self._mouse_pos['angle_deg']
+            close_angles = np.abs(angles - mouse_angle) <= max_ang
+
+            ang = angle_span[1] - angle_span[0]
+            # print("________________________", mouse_angle)
+            box_width_px = (max_ang * 2 / ang) * w  # +/- max_ang in pixels
+            
+
+            mouse_dist = self._mouse_pos['dist']
+            # mouse_dist = dist_span[0] + mouse_dist_rel * (dist_span[1] - dist_span[0])
+            close_dists = np.abs(dists - mouse_dist) <= max_dist
+            box_height_px = (max_dist * 2 / (dist_span[1] - dist_span[0])) * h  # +/- max_dist in pixels
+            
+            inside_mask = close_angles & close_dists
+            # import ipdb; ipdb.set_trace()
+            self._mouse_pos['inside_mask'] = inside_mask
+            self._mouse_pos['box_wh'] = box_width_px, box_height_px
+            
+            inside_inds = np.where(inside_mask)[0].tolist()
+            self._mouseover_lines = inside_inds
+            
+    def _update_divider_images(self):
+        # TODO:  change color to reflect mouseover
+
+        if hasattr(self, 'pipeline'):
+            self.pipeline['dividers_img'] = self.render_dividers()
+            self.pipeline['lines_img'] = self.render_line_space()
+        
+    def render_line_space(self): 
+        
+        image = np.zeros_like(self.pipeline['original'])
+        w,h = image.shape[1], image.shape[0]
+        lengths= self.pipeline['hough_line_params'][:,2]
+
         
         
-    def render_dividers(self, show_bands=False):
-        n_div = self.tabs['divider_initialization']['sliders'][0]['var'].get()
-        n_struct = self.tabs['divider_initialization']['sliders'][1]['var'].get()
-        n_color = self.tabs['divider_initialization']['sliders'][2]['var'].get()
-        logging.info(f"Rendering dividers with n_div={n_div}, n_struct={n_struct}, n_color={n_color}, show_bands={show_bands}")
-        img = np.zeros_like(self.pipeline['original'])
-        text = "Rendered %i dividers, bands " % (n_div,) + ("shown" if show_bands else "hidden")
-        cv2.putText(img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        text = "Will create network with structure 2-%i-%i-%i-3" % (n_div, n_struct, n_color)
-        cv2.putText(img, text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        rad_range = 2, 15
+        length_range=np.min(lengths), np.max(lengths)
+        
+        def length_to_rad(length):
+            length_norm = (length - length_range[0]) / (length_range[1] - length_range[0])
+            return int(rad_range[0] + length_norm * (rad_range[1] - rad_range[0]))
+        
+        logging.info("length range:  %.4f to %.4f" % (np.min(lengths), np.max(lengths)))
+        
+        box_width_px, box_height_px = self._mouse_pos['box_wh'] if self._mouse_pos is not None else (0,0)
+        length_mask = self.pipeline['hough_lines_valid']
+        inside_mask = self._mouse_pos['inside_mask'] if self._mouse_pos is not None else np.zeros(len(lengths), dtype=bool)
+        angles = self.pipeline['hough_line_params'][:,0]
+        dists = self.pipeline['hough_line_params'][:,1]
+        angle_span = np.min(angles), np.max(angles)
+        dist_span = np.min(dists), np.max(dists)
+        angle_x = (angles - angle_span[0]) / (angle_span[1] - angle_span[0]) * w
+        dist_y = (dists - dist_span[0]) / (dist_span[1] - dist_span[0]) * h
+        
+        moused = inside_mask & length_mask
+
+        for i, (x, y, length) in enumerate(zip(angle_x, dist_y, lengths)):
+            rad_px = int(length_to_rad(length))
+            color = (10, 255, 10) if moused[i] else (10, 10, 255) 
+            cv2.circle(image, (int(x), int(y)), rad_px, color, -1, cv2.LINE_AA)
+            
+        if box_width_px >0 and box_height_px>0:
+            mx, my = self._mouse_pos['px']
+            top_left = (int(mx - box_width_px//2), int(my - box_height_px//2))
+            bottom_right = (int(mx + box_width_px//2), int(my + box_height_px//2))
+            cv2.rectangle(image, top_left, bottom_right, (255,255,255), 2, cv2.LINE_AA)
+            
+            
+        logging.info(f"Rendered line space with {len(angles)} lines.")
+        #return pyr_down(image)
+        # factor = 2/3
+        # image = cv2.resize(image, (int(w*factor), int(h*factor)), interpolation=cv2.INTER_AREA)
+        
+        
+        return image
+
+    def render_dividers(self):
+        if not hasattr(self, 'pipeline') or self.pipeline['hough_lines'] is None:
+            img = np.zeros((100, 100, 3), np.uint8)
+        else:
+            length_mask = self.pipeline['hough_lines_valid']
+            
+            # Draw only lines that are both long enough and inside mouseover box
+            logging.info("Drawing %i lines on image with shape %s" % (self.pipeline['hough_lines'].shape[0], self.pipeline['hough_lines_disp'].shape))
+            inside_mask = self._mouse_pos['inside_mask'] if self._mouse_pos is not None else np.zeros(len(length_mask), dtype=bool)
+            line_inds = np.where(length_mask & inside_mask)[0].tolist()
+            img = self.pipeline['hough_lines_disp'].copy()
+            # import ipdb; ipdb.set_trace()
+            
+            for line_ind in line_inds:
+                
+                line = self.pipeline['hough_lines'][line_ind]
+                n_downsamples = self.pipeline['n_downsamples']
+                x1, y1, x2, y2 = line[0].astype(float) * (2**n_downsamples)
+                (x1, y1), (x2,y2) = (int(x1), int(y1)), (int(x2), int(y2))
+                cv2.line(img, (x1, y1), (x2, y2), (10, 255,10 ), 2, cv2.LINE_AA)
+        w,h = img.shape[1], img.shape[0]
+
+        # factor = 2/3
+        # img = cv2.resize(img, (int(w*factor), int(h*factor)), interpolation=cv2.INTER_AREA)
         return img
 
 
@@ -424,12 +620,31 @@ class ExploreLinesApp(tk.Tk):
         # Image display area
         img_width, img_height = self.image.shape[1], self.image.shape[0]
         tab_content = {}
-        tab_content['img_label'] = tk.Label(tab_frame)
-        tab_content['img_label'].grid(row=0,
-                            column=0, 
-                            columnspan=LAYOUT['tab_grid']['img_cols'],
-                            rowspan=LAYOUT['tab_grid']['img_rows'],
-                            sticky='nsew')
+        
+        if tab_config['name']=='line_finding':
+            tab_content['img_label'] = tk.Label(tab_frame)
+            tab_content['img_label'].grid(row=0,
+                                column=0, 
+                                columnspan=LAYOUT['tab_grid']['img_cols'],
+                                rowspan=LAYOUT['tab_grid']['img_rows'],
+                                sticky='nsew')
+        elif tab_config['name']=='divider_initialization':
+            tab_content['divider_img_label'] = tk.Label(tab_frame)
+            tab_content['divider_img_label'].grid(row=0,
+                                column=0, 
+                                columnspan=2,
+                                rowspan=LAYOUT['tab_grid']['img_rows'],
+                                sticky='nsew')
+            tab_content['lines_img_label'] = tk.Label(tab_frame)
+            tab_content['lines_img_label'].grid(row=0,
+                                column=3, 
+                                columnspan=2,
+                                rowspan=LAYOUT['tab_grid']['img_rows'],
+                                sticky='nsew')
+            # bind mouse events to lines_img_label
+            tab_content['lines_img_label'].bind("<Motion>", self.on_lines_img_mouse_move)
+        else:
+            raise ValueError(f"Unknown tab name: {tab_config['name']}")
         
         # status label under control area
         font_params = LAYOUT['fonts']['status']
@@ -467,6 +682,35 @@ class ExploreLinesApp(tk.Tk):
                 label.grid(row=header['row_col'][0], column=header['row_col'][1], padx=5, pady=5, columnspan=header.get('colspan', 1))
         tab_content['frame'] = tab_frame
         return tab_content
+    
+    def on_lines_img_mouse_move(self, event):
+        widget = event.widget
+        x = event.x
+        y = event.y
+
+        w = widget.winfo_width()
+        h = widget.winfo_height()
+        
+        # convert to line-param space coords (angles and distances)
+        angles = np.rad2deg(self.pipeline['hough_line_params'][:,0])
+        ang_max, ang_min = np.max(angles), np.min(angles)
+
+        distances = self.pipeline['hough_line_params'][:,1]
+        dist_max, dist_min = np.max(distances), np.min(distances)
+        
+        mouse_angle = (x / w) * (ang_max - ang_min) + ang_min  # angle param of mouse
+        mouse_dist = (y / h)  * (dist_max - dist_min) + dist_min  # distance param of mouse
+        
+        logging.info(f"Mouse moved to pixel: ({x}, {y}), angle: ({mouse_angle:.4f}, {mouse_dist:.4f})")
+        self._mouse_pos = {'px': (x, y), 
+                           'angle_deg': mouse_angle,
+                           'dist': mouse_dist,}
+        # self._filter_lines()
+        self._update_dividers()
+        self._update_divider_images()
+        self.update_image_display()
+        
+        
 
     def create_slider(self, parent,tab_name,  param):
         frame = ttk.Frame(parent)
@@ -521,9 +765,18 @@ class ExploreLinesApp(tk.Tk):
         elif slider_name in ['hough_rho_res', 'hough_theta_res_deg', 'hough_threshold',
                              'hough_min_line_length', 'hough_max_line_gap']:
             self._update_hough_lines()
-        
-        elif slider_name in ['div_n_lines', 'div_band_width_px']:
             self._update_dividers()
+            self._update_divider_images()
+        
+        elif slider_name in ['div_n_lines']:
+            #self._update_dividers()
+            logging.info("Divider slider changed, but not updating dividers yet (click apply).")
+            
+        elif slider_name in ['min_line_len', 'ang_size', 'dist_size']:
+            logging.info("Line mode specific slider changed.")
+            # self._filter_lines()
+            self._update_dividers()
+            self._update_divider_images()
             
         
         
@@ -568,7 +821,7 @@ class ExploreLinesApp(tk.Tk):
             pre_toggle['button'].state(['!selected'])
             pre_toggle['var'].set(False)
             
-        elif toggle_name == 'show_hough_lines':
+        elif toggle_name == 'show_lines':
             self.showing_lines = state
             logging.info(f"Setting showing_lines to {self.showing_lines}")
             
@@ -577,11 +830,64 @@ class ExploreLinesApp(tk.Tk):
             else:
                 toggle['button'].state(['!selected'])
                 
+        elif toggle_name in ["hough_lines", "lsd_lines"]:
+
+            self.set_line_mode(toggle_name, state)
+                
         if self.showing_lines:
             self.pipeline['hough_lines_disp'] = self.render_hough_lines()
                 
             
         self.update_image_display()
+        
+    def set_line_mode(self, line_mode, state):
+        logging.info(f"Setting line mode to {line_mode} with state {state}")
+        
+        
+        
+        if line_mode == 'hough_lines' and state:
+            hl_toggle = [t for t in self.tabs['line_finding']['toggles'] if t['name'] == 'hough_lines'][0]
+            hl_toggle['button'].state(['selected'])
+            hl_toggle['var'].set(True)
+            lsd_toggle = [t for t in self.tabs['line_finding']['toggles'] if t['name'] == 'lsd_lines'][0]
+            lsd_toggle['button'].state(['!selected'])
+            lsd_toggle['var'].set(False)
+            logging.info("Hough lines mode selected.")
+            
+            # Deactivate LSD-specific sliders
+            for slider in self.tabs['line_finding']['sliders']:
+                if 'tag' in slider and slider['tag'] == LineMode.LSD_LINES:
+                    slider['scale'].state(['disabled'])
+                    
+            # activate Hough-specific sliders
+            for slider in self.tabs['line_finding']['sliders']:
+                if 'tag' in slider and slider['tag'] == LineMode.HOUGH_LINES:
+                    slider['scale'].state(['!disabled'])
+            
+            
+            
+        elif line_mode == 'lsd_lines' and state:
+            lsd_toggle = [t for t in self.tabs['line_finding']['toggles'] if t['name'] == 'lsd_lines'][0]
+            lsd_toggle['button'].state(['selected'])
+            lsd_toggle['var'].set(True)
+            hl_toggle = [t for t in self.tabs['line_finding']['toggles'] if t['name'] == 'hough_lines'][0]
+            hl_toggle['button'].state(['!selected'])
+            hl_toggle['var'].set(False)
+            logging.info("LSD lines mode selected.")
+            
+            # activate LSD-specific sliders
+            for slider in self.tabs['line_finding']['sliders']:
+                if 'tag' in slider and slider['tag'] == LineMode.LSD_LINES:
+                    slider['scale'].state(['!disabled'])
+                    
+            # Deactivate Hough-specific sliders
+            for slider in self.tabs['line_finding']['sliders']:
+                if 'tag' in slider and slider['tag'] == LineMode.HOUGH_LINES:
+                    slider['scale'].state(['disabled'])
+                    
+                    
+        else:
+            logging.info("No line mode selected.")
         
     def create_button(self, parent, button_info):
         button={'button': ttk.Button(parent, text=button_info['label'], command=lambda: self.on_button_click(button_info['name']),
@@ -599,6 +905,13 @@ class ExploreLinesApp(tk.Tk):
             self.save_params(self._cur_tab)
         elif button_name == 'load_params':
             self.load_params(self._cur_tab)
+            self._init_image_pipeline()
+        elif button_name =='compute_dividers':
+            logging.info("Computing dividers...")
+            self._update_dividers()
+            self._update_divider_images()
+            self.update_image_display()
+            
 
         else:
             raise ValueError(f"Unknown button action: {button_name}")
@@ -642,33 +955,29 @@ class ExploreLinesApp(tk.Tk):
                     image = self.pipeline['canny_edges_disp']
                 else:
                     raise ValueError(f"Unknown view mode: {self.mode}")
+        
+            img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            img_tk = ImageTk.PhotoImage(Image.fromarray(img_rgb))
+
+            self.tabs[self._cur_tab]['img_label'].config(image=img_tk)
+            self.tabs[self._cur_tab]['img_label'].image = img_tk
                 
                 
         elif self._cur_tab == 'divider_initialization':
             
-            show_bands_toggle = [t for t in self.tabs['divider_initialization']['toggles'] if t['name'] == 'show_bands'][0]
-            show_bands = show_bands_toggle['var'].get()
-            if show_bands:
-                image = self.pipeline['dividers_img_with_bands']
-            else:
-                image = self.pipeline['dividers_img']
-        
-        
-        
-        
-        
-        img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        img_pil = Image.fromarray(img_rgb)
-        # img_pil = img_pil.resize(LAYOUT['dims']['tab_image_size_wh'])
-        img_tk = ImageTk.PhotoImage(img_pil)
+            div_image = self.pipeline['dividers_img']
+            line_image = self.pipeline['lines_img']
+            div_img_rgb = cv2.cvtColor(div_image, cv2.COLOR_BGR2RGB)
+            line_img_rgb = cv2.cvtColor(line_image, cv2.COLOR_BGR2RGB)
 
-        self.tabs[self._cur_tab]['img_label'].config(image=img_tk)
-        self.tabs[self._cur_tab]['img_label'].image = img_tk
-        
-        for tab in self.tabs.values():
-            tab['img_label'].config(image=img_tk)
-            tab['img_label'].image = img_tk
-        
+            div_img_tk = ImageTk.PhotoImage(Image.fromarray(div_img_rgb))
+            line_img_tk = ImageTk.PhotoImage(Image.fromarray(line_img_rgb))
+
+            self.tabs[self._cur_tab]['divider_img_label'].config(image=div_img_tk)
+            self.tabs[self._cur_tab]['divider_img_label'].image = div_img_tk
+            self.tabs[self._cur_tab]['lines_img_label'].config(image=line_img_tk)
+            self.tabs[self._cur_tab]['lines_img_label'].image = line_img_tk
+            
         
         
 if __name__ == "__main__":

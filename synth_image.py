@@ -342,7 +342,7 @@ def test_single9(name='mix_64_rand'):
     plt.axis('off')
     plt.show()
 
-def test_images():
+def show_all_images():
     maker = TestImageMaker((640,480))
     test_types = maker.get_types()
     logging.info("Available test image types: %s" % (test_types,))
@@ -389,10 +389,16 @@ def test_spec_image():
     plt.gca().invert_yaxis()
     plt.show()  
     
-    
+def generate_image(name, image_size_wh=(640,480)):
+    maker = TestImageMaker(image_size_wh)
+    img = maker.make_image(name)
+    filename = "%s_SYNTH.png"   % name
+    cv2.imwrite(filename, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    logging.info(f"Saved image of type {name} to file: {filename}")
     
 if __name__=="__main__":
     logging.basicConfig(level=logging.INFO)
-    # test_images()
+    show_all_images()
+    # generate_image('bw_lines_4_rand',(640,480))
     # test_single9()
-    test_spec_image()
+    # test_spec_image()

@@ -293,6 +293,48 @@ def test_captioned_image():
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+    
+def get_point_linesegs_dist(point_xy, line_starts_xy, line_ends_xy):
+    """
+    Compute the distance from a point to multiple line segments
+    :param point_xy: (2,) array of point coordinates
+    :param line_starts_xy: (N,2) array of line segment start points
+    :param line_ends_xy: (N,2) array of line segment end points
+    :return: (N,) array of distances from point to each line segment
+    """
+    p = point_xy.reshape(1, 2)
+    a = line_starts_xy
+    b = line_ends_xy
+    ab = b - a
+    ap = p - a
+    ab_squared = np.sum(ab**2, axis=1)
+    t = np.clip(np.sum(ap * ab, axis=1) / ab_squared, 0.0, 1.0)
+    projection = a + t[:, np.newaxis] * ab
+    dists = np.linalg.norm(p - projection, axis=1)
+    return dists
+
+def test_point_linesegs_dist(plot=True):
+    point = np.array([1.0, 1.0])
+    line_starts = np.array([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]])
+    line_ends = np.array([[0.0, 2.0], [2.0, 2.0], [2.0, 0.0]])
+    dists = get_point_linesegs_dist(point, line_starts, line_ends)
+    expected_dists = np.array([1.0, 1.0, 0.0])
+    if plot:
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        ax.plot(point[0], point[1], 'ro', label='Point')
+        for i in range(line_starts.shape[0]):
+            ax.plot([line_starts[i, 0], line_ends[i, 0]], [line_starts[i, 1], line_ends[i, 1]], 'b-')
+            ax.text((line_starts[i, 0] + line_ends[i, 0]) / 2, (line_starts[i, 1] + line_ends[i, 1]) / 2,
+                    f'Dist: {dists[i]:.2f}', color='green')
+        ax.set_xlim(-1, 3)
+        ax.set_ylim(-1, 3)
+        ax.set_aspect('equal')
+        ax.legend()
+        plt.show()
+    assert np.allclose(dists, expected_dists), f"Distance calculation failed: got {dists}, expected {expected_dists}"
+    print("All tests passed for get_point_linesegs_dist.")
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -300,5 +342,6 @@ if __name__ == "__main__":
     # test_add_text()
     # test_make_input_grid()
     # test_make_central_weights()
-    test_poly_expand_features()
+    # test_poly_expand_features()
+    test_point_linesegs_dist()
     logging.info("All tests passed.")

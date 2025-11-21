@@ -100,6 +100,7 @@ from util import get_point_linesegs_dist
 import sys
 from enum import IntEnum
 from find_lines import trim_image
+from render_lin_divs import DividerLineRenderer
 
 class LineMode(IntEnum):
     HOUGH_LINES = 1
@@ -180,6 +181,7 @@ LAYOUT = {'dims': {'min_size_wh': (875, 480),
 }
 
 COLORS = {'green': (10, 255, 10),
+        'neon_green': (150, 255, 100),
           'red': (255, 10, 10),
           'yellow': (255, 255, 10),
           'gray': (128, 128, 128),
@@ -220,11 +222,18 @@ def get_canny_edges(image, lower_thresh, upper_thresh):
 def get_hough_lines(edges, rho_res, theta_res_deg, threshold, min_line_length,   max_line_gap):
     theta_res = np.deg2rad(theta_res_deg)
     logging.info("Finding Hough lines in image with shape %s" % (edges.shape,))
+
     lines = cv2.HoughLinesP(edges, rho_res, theta_res, threshold,
                             minLineLength=min_line_length,
                             maxLineGap=max_line_gap)
     return lines
 
+def _get_range(values, single_pad = 0.1):
+    if len(values) == 1:
+        margin = single_pad * np.abs(values[0]) if values[0] !=0 else single_pad
+        return values[0]-margin, values[0]+margin
+    else:
+        return np.min(values), np.max(values)
 
 
 class ViewMode(IntEnum):
@@ -413,7 +422,7 @@ class ExploreLinesApp(tk.Tk):
             
             
         self.pipeline = {}
-        # import ipdb; ipdb.set_trace()
+        
         self._update_preprocessing()
         self._update_canny_edges()
         self._update_hough_lines()
@@ -457,15 +466,20 @@ class ExploreLinesApp(tk.Tk):
     
     def pixel_to_logical(self, size_wh, x, y):
         w, h = size_wh
-        lx = (x / w - 0.5) * self.x_scale
-        ly = (y / h - 0.5) * self.y_scale
+        y = h - y  # flip y axis
+        lx = ((x / w) - 0.5) * 2 * self.x_scale
+        ly = ((y / h) - 0.5) * 2 * self.y_scale  # flip y axis
         return lx, ly
     
     def logical_to_pixel(self, size_wh, lx, ly):
+        """
+        inverse of pixel_to_logical
+        """
         w, h = size_wh
-        x = int((lx / self.x_scale + 0.5) * w)
-        y = int((ly / self.y_scale + 0.5) * h)
-        return x, y
+        y = ((ly / self.y_scale) / 2 + 0.5) * h
+        y = h - y  # flip y axis
+        x = ((lx / self.x_scale) / 2 + 0.5) * w
+        return int(x), int(y)
         
     def _calc_line_params(self):
         """
@@ -484,16 +498,19 @@ class ExploreLinesApp(tk.Tk):
             x0, y0, x1, y1 = line[0]
             x0, y0 = self.pixel_to_logical(size_wh, x0, y0)
             x1, y1 = self.pixel_to_logical(size_wh, x1, y1)
+            
             angle = np.arctan2(y1 - y0, x1 - x0)
+
             # dist = np.sqrt((cx - (x0 + x1) // 2) ** 2 + (cy - (y0 + y1) // 2) ** 2)
             
             num = (x0*y1 - x1*y0)
             denom = np.sqrt((y1 - y0)**2 + (x1 - x0)**2)
-            dist = num / denom  # signed distance from origin to line            
+            dist = -num / denom  # signed distance from origin to line            
             length = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
             line_params.append((angle, dist, length))
-        line_params = np.array(line_params)
+        line_params = np.array(line_params).reshape(-1, 3)
         logging.info(f"Calculated logical parameters for {len(line_params)} lines.")
+        
         return line_params
     
     def _find_support(self, valid_mask):
@@ -627,15 +644,15 @@ class ExploreLinesApp(tk.Tk):
         if self._mouse_pos is not None:
             dists = self.pipeline['hough_line_params'][:,1]
             angles = np.rad2deg(self.pipeline['hough_line_params'][:,0])
-            angle_span = np.min(angles), np.max(angles)
-            dist_span = np.min(dists), np.max(dists)
+            angle_span = _get_range(angles)
+            dist_span = _get_range(dists)
             # angle_x = (angles - angle_span[0]) / (angle_span[1] - angle_span[0]) * w
             # dist_y = (dists - dist_span[0]) / (dist_span[1] - dist_span[0]) * h
 
             # angles_deg = np.rad2deg(angles)
             mouse_angle = self._mouse_pos['angle_deg']
             close_angles = np.abs(angles - mouse_angle) <= max_ang
-
+            
             ang = angle_span[1] - angle_span[0]
             # print("________________________", mouse_angle)
             box_width_px = (max_ang * 2 / ang) * w  # +/- max_ang in pixels
@@ -647,7 +664,7 @@ class ExploreLinesApp(tk.Tk):
             box_height_px = (max_dist * 2 / (dist_span[1] - dist_span[0])) * h  # +/- max_dist in pixels
             
             inside_mask = close_angles & close_dists
-            # import ipdb; ipdb.set_trace()
+            
             self._mouse_pos['inside_mask'] = inside_mask
             self._mouse_pos['box_wh'] = box_width_px, box_height_px
             
@@ -656,20 +673,24 @@ class ExploreLinesApp(tk.Tk):
             
     def _update_divider_images(self):
         if hasattr(self, 'pipeline'):
-            self.pipeline['lines_img'] = self.render_line_space()
+            try:
+                self.pipeline['lines_img'] = self.render_line_space()
+            except:
+                pass
             self.pipeline['divider_candidates_img'] = self.render_divider_candidates()
             self.pipeline['dividers_img'] = self.render_dividers()
             
     def render_line_space(self): 
         
+        
+        
+        
         image = np.zeros_like(self.pipeline['original'])
         w,h = image.shape[1], image.shape[0]
         lengths= self.pipeline['hough_line_params'][:,2]
 
-        
-        
         rad_range = 2, 15
-        length_range=np.min(lengths), np.max(lengths)
+        length_range = _get_range(lengths)
         
         def length_to_rad(length):
             length_norm = (length - length_range[0]) / (length_range[1] - length_range[0])
@@ -682,8 +703,9 @@ class ExploreLinesApp(tk.Tk):
         inside_mask = self._mouse_pos['inside_mask'] if self._mouse_pos is not None else np.zeros(len(lengths), dtype=bool)
         angles = self.pipeline['hough_line_params'][:,0]
         dists = self.pipeline['hough_line_params'][:,1]
-        angle_span = np.min(angles), np.max(angles)
-        dist_span = np.min(dists), np.max(dists)
+    
+        angle_span = _get_range(angles)
+        dist_span = _get_range(dists)
         angle_x = (angles - angle_span[0]) / (angle_span[1] - angle_span[0]) * w
         dist_y = (dists - dist_span[0]) / (dist_span[1] - dist_span[0]) * h
         
@@ -696,6 +718,7 @@ class ExploreLinesApp(tk.Tk):
             
         if box_width_px >0 and box_height_px>0:
             mx, my = self._mouse_pos['px']
+            
             top_left = (int(mx - box_width_px//2), int(my - box_height_px//2))
             bottom_right = (int(mx + box_width_px//2), int(my + box_height_px//2))
             cv2.rectangle(image, top_left, bottom_right, COLORS['white'], 2, cv2.LINE_AA)
@@ -713,14 +736,11 @@ class ExploreLinesApp(tk.Tk):
         if not hasattr(self, 'pipeline') or self.pipeline['hough_lines'] is None:
             img = np.zeros((100, 100, 3), np.uint8)
         else:
-            
-            img = self.pipeline['divider_candidates_img'].copy()
-            # import ipdb; ipdb.set_trace()
-            
-        w,h = img.shape[1], img.shape[0]
-
-        # factor = 2/3
-        # img = cv2.resize(img, (int(w*factor), int(h*factor)), interpolation=cv2.INTER_AREA)
+            # n_downsamples = self.pipeline['n_downsamples']
+            img = self.pipeline['original'].copy()
+            size_wh = img.shape[1], img.shape[0]
+            renderer = DividerLineRenderer(size_wh)
+            renderer.draw_lines(img, self.pipeline['dividers'], COLORS['neon_green'], thickness=3)
         return img
 
     def render_divider_candidates(self):

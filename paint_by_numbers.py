@@ -519,10 +519,10 @@ def test_make_LUT(image_size=(128,96), n_circles=0, n_lines=5):
     # dividers = dividers_from_model(r'test_test_circles\SYNTH_bw_circles_test_model_2c_4c.pkl')
                                    # test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl
     # dividers = dividers_from_model(r'test_mix_3\SYNTH_mix_A_3_3_rand_model_5c-3l_15t_10c.pkl')
-    dividers = dividers_from_model(r'blah\SYNTH_c_lines_5_rand_train_5l_10t_10c_model_5l_10t_10c.pkl')
+    dividers = dividers_from_model(r'blah\SYNTH_c_lines_5_rand_train_model_5l_10t_10c.pkl')
     
     
-    image = cv2.imread('blah\SYNTH_c_lines_5_rand_train_5l_10t_10c_train_5l_10t_10c.png')[:,:,::-1]
+    image = cv2.imread('blah\SYNTH_c_lines_5_rand_train_train_5l_10t_10c.png')[:,:,::-1]
 
     
     # image = image_maker.make_image('c_lines_5_rand')
